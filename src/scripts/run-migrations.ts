@@ -33,7 +33,9 @@ const migrations = [
     '20260313_order_email_templates.sql',
     '20260313_order_email_logs.sql',
     '20260313_settings_smtp_config.sql',
-    '20260313_settings_tiktok.sql'
+    '20260313_settings_tiktok.sql',
+    '20260313_auth_refresh_tokens.sql',
+    '20260313_admin_audit_logs.sql'
 ];
 
 async function runMigrations() {

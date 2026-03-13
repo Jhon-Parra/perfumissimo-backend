@@ -20,7 +20,7 @@ import paymentRoutes from './routes/payment.routes';
 import permissionsRoutes from './routes/permissions.routes';
 import categoryRoutes from './routes/category.routes';
 import emailTemplatesRoutes from './routes/email-templates.routes';
-import { generalLimiter, authLimiter, aiLimiter, createOrderLimiter } from './middleware/security.middleware';
+import { generalLimiter, authLimiter, refreshLimiter, logoutLimiter, aiLimiter, createOrderLimiter } from './middleware/security.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import path from 'path';
 
@@ -36,7 +36,22 @@ const disableAuthLimiter = process.env.DISABLE_AUTH_LIMIT === 'true';
 // Permitir que el frontend (mismo site, distinto puerto en dev) pueda cargar recursos (imagenes/video)
 // desde el backend sin bloqueo por Cross-Origin-Resource-Policy.
 app.use(helmet({
-    crossOriginResourcePolicy: { policy: 'cross-origin' }
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    contentSecurityPolicy: {
+        useDefaults: false,
+        directives: {
+            "default-src": ["'none'"],
+            "img-src": ["'self'", 'data:', 'https:'],
+            "media-src": ["'self'", 'https:'],
+            "connect-src": ["'self'"],
+            "script-src": ["'self'"],
+            "style-src": ["'self'"],
+            "base-uri": ["'none'"],
+            "form-action": ["'self'"],
+            "frame-ancestors": ["'none'"]
+        }
+    },
+    referrerPolicy: { policy: 'no-referrer' }
 }));
 app.use(morgan('combined'));
 app.use(cookieParser());
@@ -81,11 +96,11 @@ app.use(cors({
             return;
         }
 
-        // Permitir requests sin Origin (curl/postman)
-        if (!origin) {
-            callback(null, true);
-            return;
-        }
+    // Permitir requests sin Origin (curl/postman)
+    if (!origin) {
+        callback(null, true);
+        return;
+    }
 
         if (allowedOrigins.includes(origin)) {
             callback(null, true);
@@ -116,7 +131,11 @@ app.use((req, res, next) => {
     const origin = String(req.headers.origin || '').trim();
     if (!origin) {
         // curl/postman/no-origin
-        next();
+        if (process.env.ALLOW_NO_ORIGIN === 'true') {
+            next();
+            return;
+        }
+        res.status(403).json({ error: 'Origin requerido' });
         return;
     }
 
@@ -140,6 +159,8 @@ if (!disableAuthLimiter) {
 }
 app.use('/api/auth/register', authLimiter);
 app.use('/api/auth/google', authLimiter);
+app.use('/api/auth/refresh', refreshLimiter);
+app.use('/api/auth/logout', logoutLimiter);
 app.use('/api/orders/checkout', createOrderLimiter);
 app.use('/api/ai/generate-description', aiLimiter);
 

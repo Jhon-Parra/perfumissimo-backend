@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { pool } from '../config/database';
 import { OAuth2Client } from 'google-auth-library';
 
@@ -30,14 +31,105 @@ interface JwtPayload {
 }
 
 const isProduction = process.env.NODE_ENV === 'production';
+const allowCrossSiteCookies = process.env.COOKIE_CROSS_SITE === 'true';
 
-const cookieSameSite: 'lax' | 'none' = isProduction ? 'none' : 'lax';
+const cookieSameSite: 'lax' | 'none' = isProduction && allowCrossSiteCookies ? 'none' : 'lax';
 
 const cookieBaseOptions = {
     httpOnly: true,
     secure: isProduction,
     sameSite: cookieSameSite,
     path: '/'
+};
+
+const hashToken = (token: string): string =>
+    crypto.createHash('sha256').update(token).digest('hex');
+
+const getRequestMeta = (req: Request) => {
+    const ip = req.ip ? String(req.ip) : null;
+    const userAgent = req.headers?.['user-agent']
+        ? String(req.headers['user-agent']).slice(0, 300)
+        : null;
+    return { ip, userAgent };
+};
+
+const storeRefreshToken = async (userId: string, refreshToken: string, req: Request): Promise<void> => {
+    const tokenHash = hashToken(refreshToken);
+    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY);
+    const { ip, userAgent } = getRequestMeta(req);
+
+    await pool.query(
+        `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip, user_agent)
+         VALUES (?, ?, ?, ?, ?)`,
+        [userId, tokenHash, expiresAt, ip, userAgent]
+    );
+};
+
+const revokeRefreshToken = async (refreshToken: string | undefined | null): Promise<void> => {
+    if (!refreshToken) return;
+    const tokenHash = hashToken(refreshToken);
+    await pool.query(
+        `UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = ?`,
+        [tokenHash]
+    );
+};
+
+const rotateRefreshToken = async (
+    userId: string,
+    currentRefreshToken: string,
+    nextRefreshToken: string,
+    req: Request
+): Promise<'ok' | 'not_found' | 'revoked'> => {
+    const client = await pool.getConnection();
+    const now = new Date();
+    const tokenHash = hashToken(currentRefreshToken);
+    const nextHash = hashToken(nextRefreshToken);
+    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY);
+    const { ip, userAgent } = getRequestMeta(req);
+
+    try {
+        await client.query('BEGIN');
+
+        const result = await client.query(
+            `SELECT id, revoked_at, expires_at
+             FROM refresh_tokens
+             WHERE token_hash = $1 AND user_id = $2`,
+            [tokenHash, userId]
+        );
+
+        if (result.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return 'not_found';
+        }
+
+        const row = result.rows[0];
+        const expired = row.expires_at ? new Date(row.expires_at) <= now : true;
+        if (row.revoked_at || expired) {
+            await client.query('ROLLBACK');
+            return 'revoked';
+        }
+
+        await client.query(
+            `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip, user_agent)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [userId, nextHash, expiresAt, ip, userAgent]
+        );
+
+        await client.query(
+            `UPDATE refresh_tokens
+             SET revoked_at = NOW(), replaced_by_hash = $1
+             WHERE id = $2`,
+            [nextHash, row.id]
+        );
+
+        await client.query('COMMIT');
+        return 'ok';
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
+    }
 };
 
 const generateTokens = (usuario: any) => {
@@ -101,6 +193,15 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         const { accessToken, refreshToken } = generateTokens(usuario);
         setTokenCookies(res, accessToken, refreshToken);
 
+        try {
+            await storeRefreshToken(String(usuario.id), refreshToken, req);
+        } catch (e: any) {
+            console.error('Error storing refresh token:', e?.message || e);
+            clearTokenCookies(res);
+            res.status(500).json({ error: 'No se pudo iniciar sesión. Intenta nuevamente.' });
+            return;
+        }
+
         res.status(200).json({
             message: 'Autenticación exitosa',
             user: {
@@ -154,6 +255,15 @@ export const register = async (req: Request, res: Response): Promise<void> => {
 
         const { accessToken, refreshToken } = generateTokens(usuario);
         setTokenCookies(res, accessToken, refreshToken);
+
+        try {
+            await storeRefreshToken(String(usuario.id), refreshToken, req);
+        } catch (e: any) {
+            console.error('Error storing refresh token:', e?.message || e);
+            clearTokenCookies(res);
+            res.status(500).json({ error: 'No se pudo completar el registro. Intenta nuevamente.' });
+            return;
+        }
 
         res.status(201).json({
             message: 'Usuario registrado exitosamente',
@@ -238,6 +348,15 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
         const { accessToken, refreshToken } = generateTokens(usuario);
         setTokenCookies(res, accessToken, refreshToken);
 
+        try {
+            await storeRefreshToken(String(usuario.id), refreshToken, req);
+        } catch (e: any) {
+            console.error('Error storing refresh token:', e?.message || e);
+            clearTokenCookies(res);
+            res.status(500).json({ error: 'No se pudo iniciar sesión con Google. Intenta nuevamente.' });
+            return;
+        }
+
         res.status(200).json({
             message: 'Autenticación con Google exitosa',
             user: {
@@ -280,6 +399,14 @@ export const refreshToken = async (req: Request, res: Response): Promise<void> =
 
         const usuario = usuarios[0];
         const tokens = generateTokens(usuario);
+
+        const rotation = await rotateRefreshToken(String(usuario.id), refreshToken, tokens.refreshToken, req);
+        if (rotation !== 'ok') {
+            clearTokenCookies(res);
+            res.status(401).json({ error: 'Refresh token inválido o expirado' });
+            return;
+        }
+
         setTokenCookies(res, tokens.accessToken, tokens.refreshToken);
 
         res.status(200).json({
@@ -300,6 +427,11 @@ export const refreshToken = async (req: Request, res: Response): Promise<void> =
 };
 
 export const logout = async (req: Request, res: Response): Promise<void> => {
+    try {
+        await revokeRefreshToken(req.cookies?.refresh_token);
+    } catch (e: any) {
+        console.warn('Error revoking refresh token:', e?.message || e);
+    }
     clearTokenCookies(res);
     res.status(200).json({ message: 'Logout exitoso' });
 };

@@ -16,6 +16,22 @@ export const authLimiter = rateLimit({
     legacyHeaders: false
 });
 
+export const refreshLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 30,
+    message: { error: 'Demasiadas solicitudes de refresh, intenta más tarde' },
+    standardHeaders: 'draft-7',
+    legacyHeaders: false
+});
+
+export const logoutLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 20,
+    message: { error: 'Demasiadas solicitudes de logout, intenta más tarde' },
+    standardHeaders: 'draft-7',
+    legacyHeaders: false
+});
+
 export const aiLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
     limit: 10,

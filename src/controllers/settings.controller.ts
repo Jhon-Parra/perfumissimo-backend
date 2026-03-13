@@ -3,6 +3,7 @@ import { pool } from '../config/database';
 import { supabase } from '../config/supabase';
 import { sanitizeFilename } from '../middleware/upload.middleware';
 import { encryptString } from '../utils/encryption.util';
+import { logAdminAction } from '../services/audit.service';
 
 interface SettingsRow {
     hero_title: string;
@@ -753,6 +754,19 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
         if (result.affectedRows === 0) {
             res.status(404).json({ error: 'No se pudo actualizar la configuración' });
             return;
+        }
+
+        const actorUserId = String((req as any)?.user?.id || '').trim();
+        if (actorUserId) {
+            const excluded = new Set(['instagram_access_token', 'smtp_pass', 'wompi_private_key']);
+            const fields = Object.keys(req.body || {}).filter((k) => !excluded.has(k));
+            await logAdminAction({
+                actorUserId,
+                action: 'settings.update',
+                target: 'ConfiguracionGlobal',
+                metadata: { fields },
+                req
+            });
         }
 
         res.status(200).json({
