@@ -42,6 +42,73 @@ const upload_middleware_1 = require("../middleware/upload.middleware");
 let promotionAssignmentReady = null;
 let promotionGenderReady = null;
 let promotionAdvancedReady = null;
+let categoriesReady = null;
+const detectCategoriesSchema = async () => {
+    if (categoriesReady !== null)
+        return categoriesReady;
+    try {
+        const [rows] = await database_1.pool.query("SELECT to_regclass('categorias') IS NOT NULL AS ok");
+        categoriesReady = !!rows?.[0]?.ok;
+        return categoriesReady;
+    }
+    catch {
+        categoriesReady = false;
+        return false;
+    }
+};
+const normalizeCategorySlug = (raw) => {
+    if (raw === undefined || raw === null)
+        return null;
+    const v = String(raw).trim().toLowerCase();
+    if (!v)
+        return null;
+    return v.length > 120 ? v.slice(0, 120) : v;
+};
+const getCategorySqlParts = async () => {
+    const ok = await detectCategoriesSchema();
+    if (!ok)
+        return { categorySelect: '', categoryJoin: '' };
+    return {
+        categorySelect: ', c.nombre AS categoria_nombre, c.slug AS categoria_slug',
+        categoryJoin: 'LEFT JOIN Categorias c ON c.slug = p.genero'
+    };
+};
+const ensureCategoryExists = async (slug) => {
+    try {
+        const [rows] = await database_1.pool.query('SELECT 1 AS ok FROM Categorias WHERE slug = $1 LIMIT 1', [slug]);
+        return !!rows?.[0]?.ok;
+    }
+    catch {
+        return false;
+    }
+};
+let productNewUntilReady = null;
+const detectProductNewUntilSchema = async () => {
+    if (productNewUntilReady !== null)
+        return productNewUntilReady;
+    try {
+        const [rows] = await database_1.pool.query(`SELECT 1 AS ok
+             FROM information_schema.columns
+             WHERE table_name = 'productos'
+               AND column_name = 'nuevo_hasta'
+             LIMIT 1`);
+        productNewUntilReady = !!rows?.[0]?.ok;
+        return productNewUntilReady;
+    }
+    catch {
+        productNewUntilReady = false;
+        return false;
+    }
+};
+const parseNuevoHastaInput = (raw) => {
+    if (raw === undefined || raw === null)
+        return undefined;
+    const v = String(raw).trim();
+    if (!v)
+        return null;
+    // Aceptar formatos comunes (datetime-local o ISO); Postgres parsea.
+    return v;
+};
 const detectPromotionAssignmentSchema = async () => {
     if (promotionAssignmentReady !== null)
         return promotionAssignmentReady;
@@ -131,8 +198,25 @@ const getPromotionAdvancedSqlParts = async () => {
 };
 const createProduct = async (req, res) => {
     try {
-        const { nombre, genero, descripcion, notas_olfativas, notas, precio, stock, unidades_vendidas, es_nuevo } = req.body;
+        const { nombre, genero, descripcion, notas_olfativas, notas, precio, stock, unidades_vendidas, es_nuevo, nuevo_hasta } = req.body;
         const notasFinal = notas_olfativas || notas;
+        const categoriesOk = await detectCategoriesSchema();
+        const newUntilOk = await detectProductNewUntilSchema();
+        const generoNormalized = normalizeCategorySlug(genero) || 'unisex';
+        if (categoriesOk) {
+            const exists = await ensureCategoryExists(generoNormalized);
+            if (!exists) {
+                res.status(400).json({ error: 'Categoria invalida. Crea la categoria primero en Admin > Categorias.' });
+                return;
+            }
+        }
+        const nuevoHastaParsed = parseNuevoHastaInput(nuevo_hasta);
+        if (nuevoHastaParsed !== undefined && !newUntilOk) {
+            res.status(400).json({
+                error: 'Tu base de datos no soporta expiración de etiqueta NUEVO. Ejecuta database/migrations/20260312_products_new_badge_expiration.sql en Supabase y vuelve a intentar.'
+            });
+            return;
+        }
         let imagen_url = null;
         if (req.file) {
             const uniqueFilename = (0, upload_middleware_1.sanitizeFilename)(req.file.originalname);
@@ -151,14 +235,11 @@ const createProduct = async (req, res) => {
         }
         const id = (0, uuid_1.v4)();
         // Convert UUID to BINARY(16) in MySQL logic
-        const query = `
-            INSERT INTO Productos (id, nombre, genero, descripcion, notas_olfativas, precio, stock, unidades_vendidas, imagen_url, es_nuevo)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
-        await database_1.pool.query(query, [
+        const cols = ['id', 'nombre', 'genero', 'descripcion', 'notas_olfativas', 'precio', 'stock', 'unidades_vendidas', 'imagen_url', 'es_nuevo'];
+        const vals = [
             id,
             nombre,
-            genero || 'unisex',
+            generoNormalized,
             descripcion,
             notasFinal,
             precio,
@@ -166,7 +247,14 @@ const createProduct = async (req, res) => {
             unidades_vendidas || 0,
             imagen_url,
             !!es_nuevo
-        ]);
+        ];
+        if (newUntilOk) {
+            cols.push('nuevo_hasta');
+            vals.push(nuevoHastaParsed === undefined ? null : nuevoHastaParsed);
+        }
+        const placeholders = cols.map(() => '?').join(', ');
+        const query = `INSERT INTO Productos (${cols.join(', ')}) VALUES (${placeholders})`;
+        await database_1.pool.query(query, vals);
         res.status(201).json({
             message: 'Producto creado exitosamente',
             product: { id, nombre, precio, imagen_url }
@@ -181,10 +269,22 @@ exports.createProduct = createProduct;
 // 2. Obtener todos los productos
 const getProducts = async (req, res) => {
     try {
-        const [rows] = await database_1.pool.query(`
-            SELECT id, nombre, genero, descripcion, notas_olfativas, precio, stock, unidades_vendidas, imagen_url, es_nuevo, creado_en 
-            FROM Productos
-        `);
+        const { categorySelect, categoryJoin } = await getCategorySqlParts();
+        const newUntilOk = await detectProductNewUntilSchema();
+        const esNuevoExpr = newUntilOk
+            ? `CASE
+                WHEN COALESCE(p.es_nuevo, false) = false THEN false
+                WHEN p.nuevo_hasta IS NULL THEN true
+                WHEN p.nuevo_hasta >= NOW() THEN true
+                ELSE false
+               END AS es_nuevo`
+            : 'COALESCE(p.es_nuevo, false) AS es_nuevo';
+        const extraSelect = newUntilOk ? ', p.nuevo_hasta' : '';
+        const [rows] = await database_1.pool.query(`SELECT p.id, p.nombre, p.genero${categorySelect}, p.descripcion, p.notas_olfativas, p.precio, p.stock, p.unidades_vendidas, p.imagen_url,
+                    ${esNuevoExpr}${extraSelect}, p.creado_en
+             FROM Productos p
+             ${categoryJoin}
+             ORDER BY p.creado_en DESC`);
         res.status(200).json(rows);
     }
     catch (error) {
@@ -210,6 +310,16 @@ const getPublicCatalog = async (req, res) => {
         }
         const assignmentReady = await detectPromotionAssignmentSchema();
         const genderReady = await detectPromotionGenderSchema();
+        const newUntilOk = await detectProductNewUntilSchema();
+        const esNuevoExpr = newUntilOk
+            ? `CASE
+                WHEN COALESCE(p.es_nuevo, false) = false THEN false
+                WHEN p.nuevo_hasta IS NULL THEN true
+                WHEN p.nuevo_hasta >= NOW() THEN true
+                ELSE false
+               END AS es_nuevo`
+            : 'COALESCE(p.es_nuevo, false) AS es_nuevo';
+        const { categorySelect, categoryJoin } = await getCategorySqlParts();
         const { advancedReady, discountAmountExpr, orderByPromo } = await getPromotionAdvancedSqlParts();
         let rows = [];
         if (assignmentReady) {
@@ -219,14 +329,14 @@ const getPublicCatalog = async (req, res) => {
             const [newRows] = await database_1.pool.query(`SELECT
                     p.id,
                     p.nombre,
-                    p.genero,
+                    p.genero${categorySelect},
                     p.descripcion,
                     p.notas_olfativas,
                     p.precio,
                     p.stock,
                     p.unidades_vendidas,
                     p.imagen_url,
-                    COALESCE(p.es_nuevo, false) AS es_nuevo,
+                    ${esNuevoExpr},
                     best.promo_id,
                     best.promo_nombre,
                     best.porcentaje_descuento,
@@ -236,6 +346,7 @@ const getPublicCatalog = async (req, res) => {
                     best.monto_descuento,
                     best.precio_con_descuento
                 FROM Productos p
+                ${categoryJoin}
                 LEFT JOIN LATERAL (
                     SELECT
                         pr.id AS promo_id,
@@ -279,14 +390,14 @@ const getPublicCatalog = async (req, res) => {
             const [oldRows] = await database_1.pool.query(`SELECT
                     p.id,
                     p.nombre,
-                    p.genero,
+                    p.genero${categorySelect},
                     p.descripcion,
                     p.notas_olfativas,
                     p.precio,
                     p.stock,
                     p.unidades_vendidas,
                     p.imagen_url,
-                    COALESCE(p.es_nuevo, false) AS es_nuevo,
+                    ${esNuevoExpr},
                     pr.id AS promo_id,
                     pr.nombre AS promo_nombre,
                     pr.porcentaje_descuento,
@@ -303,6 +414,7 @@ const getPublicCatalog = async (req, res) => {
                 : '(p.precio * (pr.porcentaje_descuento / 100.0))'}))::numeric, 2)
                     END AS precio_con_descuento
                 FROM Productos p
+                ${categoryJoin}
                 LEFT JOIN Promociones pr
                     ON pr.id = p.promocion_id
                     AND pr.activo = true
@@ -362,6 +474,16 @@ const getNewestProducts = async (req, res) => {
         const assignmentReady = await detectPromotionAssignmentSchema();
         const genderReady = await detectPromotionGenderSchema();
         const { advancedReady, discountAmountExpr, orderByPromo } = await getPromotionAdvancedSqlParts();
+        const newUntilOk = await detectProductNewUntilSchema();
+        const esNuevoExpr = newUntilOk
+            ? `CASE
+                WHEN COALESCE(p.es_nuevo, false) = false THEN false
+                WHEN p.nuevo_hasta IS NULL THEN true
+                WHEN p.nuevo_hasta >= NOW() THEN true
+                ELSE false
+               END AS es_nuevo`
+            : 'COALESCE(p.es_nuevo, false) AS es_nuevo';
+        const { categorySelect, categoryJoin } = await getCategorySqlParts();
         let rows = [];
         if (assignmentReady) {
             const genderCondition = genderReady
@@ -370,14 +492,14 @@ const getNewestProducts = async (req, res) => {
             const [newRows] = await database_1.pool.query(`SELECT
                     p.id,
                     p.nombre,
-                    p.genero,
+                    p.genero${categorySelect},
                     p.descripcion,
                     p.notas_olfativas,
                     p.precio,
                     p.stock,
                     p.unidades_vendidas,
                     p.imagen_url,
-                    COALESCE(p.es_nuevo, false) AS es_nuevo,
+                    ${esNuevoExpr},
                     best.promo_id,
                     best.promo_nombre,
                     best.porcentaje_descuento,
@@ -387,6 +509,7 @@ const getNewestProducts = async (req, res) => {
                     best.monto_descuento,
                     best.precio_con_descuento
                 FROM Productos p
+                ${categoryJoin}
                 LEFT JOIN LATERAL (
                     SELECT
                         pr.id AS promo_id,
@@ -431,14 +554,14 @@ const getNewestProducts = async (req, res) => {
             const [oldRows] = await database_1.pool.query(`SELECT
                     p.id,
                     p.nombre,
-                    p.genero,
+                    p.genero${categorySelect},
                     p.descripcion,
                     p.notas_olfativas,
                     p.precio,
                     p.stock,
                     p.unidades_vendidas,
                     p.imagen_url,
-                    COALESCE(p.es_nuevo, false) AS es_nuevo,
+                    ${esNuevoExpr},
                     pr.id AS promo_id,
                     pr.nombre AS promo_nombre,
                     pr.porcentaje_descuento,
@@ -455,6 +578,7 @@ const getNewestProducts = async (req, res) => {
                 : '(p.precio * (pr.porcentaje_descuento / 100.0))'}))::numeric, 2)
                     END AS precio_con_descuento
                 FROM Productos p
+                ${categoryJoin}
                 LEFT JOIN Promociones pr
                     ON pr.id = p.promocion_id
                     AND pr.activo = true
@@ -514,6 +638,16 @@ const getProductById = async (req, res) => {
         const assignmentReady = await detectPromotionAssignmentSchema();
         const genderReady = await detectPromotionGenderSchema();
         const { advancedReady, discountAmountExpr, orderByPromo } = await getPromotionAdvancedSqlParts();
+        const newUntilOk = await detectProductNewUntilSchema();
+        const esNuevoExpr = newUntilOk
+            ? `CASE
+                WHEN COALESCE(p.es_nuevo, false) = false THEN false
+                WHEN p.nuevo_hasta IS NULL THEN true
+                WHEN p.nuevo_hasta >= NOW() THEN true
+                ELSE false
+               END AS es_nuevo`
+            : 'COALESCE(p.es_nuevo, false) AS es_nuevo';
+        const { categorySelect, categoryJoin } = await getCategorySqlParts();
         let rows = [];
         if (assignmentReady) {
             const genderCondition = genderReady
@@ -522,14 +656,14 @@ const getProductById = async (req, res) => {
             const [newRows] = await database_1.pool.query(`SELECT
                     p.id,
                     p.nombre,
-                    p.genero,
+                    p.genero${categorySelect},
                     p.descripcion,
                     p.notas_olfativas,
                     p.precio,
                     p.stock,
                     p.unidades_vendidas,
                     p.imagen_url,
-                    COALESCE(p.es_nuevo, false) AS es_nuevo,
+                    ${esNuevoExpr},
                     best.promo_id,
                     best.promo_nombre,
                     best.porcentaje_descuento,
@@ -539,6 +673,7 @@ const getProductById = async (req, res) => {
                     best.monto_descuento,
                     best.precio_con_descuento
                 FROM Productos p
+                ${categoryJoin}
                 LEFT JOIN LATERAL (
                     SELECT
                         pr.id AS promo_id,
@@ -582,14 +717,14 @@ const getProductById = async (req, res) => {
             const [oldRows] = await database_1.pool.query(`SELECT
                     p.id,
                     p.nombre,
-                    p.genero,
+                    p.genero${categorySelect},
                     p.descripcion,
                     p.notas_olfativas,
                     p.precio,
                     p.stock,
                     p.unidades_vendidas,
                     p.imagen_url,
-                    COALESCE(p.es_nuevo, false) AS es_nuevo,
+                    ${esNuevoExpr},
                     pr.id AS promo_id,
                     pr.nombre AS promo_nombre,
                     pr.porcentaje_descuento,
@@ -606,6 +741,7 @@ const getProductById = async (req, res) => {
                 : '(p.precio * (pr.porcentaje_descuento / 100.0))'}))::numeric, 2)
                     END AS precio_con_descuento
                 FROM Productos p
+                ${categoryJoin}
                 LEFT JOIN Promociones pr
                     ON pr.id = p.promocion_id
                     AND pr.activo = true
@@ -668,6 +804,16 @@ const getRelatedProducts = async (req, res) => {
         const assignmentReady = await detectPromotionAssignmentSchema();
         const genderReady = await detectPromotionGenderSchema();
         const { advancedReady, discountAmountExpr, orderByPromo } = await getPromotionAdvancedSqlParts();
+        const newUntilOk = await detectProductNewUntilSchema();
+        const esNuevoExpr = newUntilOk
+            ? `CASE
+                WHEN COALESCE(p.es_nuevo, false) = false THEN false
+                WHEN p.nuevo_hasta IS NULL THEN true
+                WHEN p.nuevo_hasta >= NOW() THEN true
+                ELSE false
+               END AS es_nuevo`
+            : 'COALESCE(p.es_nuevo, false) AS es_nuevo';
+        const { categorySelect, categoryJoin } = await getCategorySqlParts();
         // Base genero
         const [gRows] = await database_1.pool.query('SELECT genero FROM Productos WHERE id = $1::uuid LIMIT 1', [id]);
         const genero = gRows?.[0]?.genero;
@@ -683,14 +829,14 @@ const getRelatedProducts = async (req, res) => {
             const [newRows] = await database_1.pool.query(`SELECT
                     p.id,
                     p.nombre,
-                    p.genero,
+                    p.genero${categorySelect},
                     p.descripcion,
                     p.notas_olfativas,
                     p.precio,
                     p.stock,
                     p.unidades_vendidas,
                     p.imagen_url,
-                    COALESCE(p.es_nuevo, false) AS es_nuevo,
+                    ${esNuevoExpr},
                     best.promo_id,
                     best.promo_nombre,
                     best.porcentaje_descuento,
@@ -700,6 +846,7 @@ const getRelatedProducts = async (req, res) => {
                     best.monto_descuento,
                     best.precio_con_descuento
                 FROM Productos p
+                ${categoryJoin}
                 LEFT JOIN LATERAL (
                     SELECT
                         pr.id AS promo_id,
@@ -746,14 +893,14 @@ const getRelatedProducts = async (req, res) => {
             const [oldRows] = await database_1.pool.query(`SELECT
                     p.id,
                     p.nombre,
-                    p.genero,
+                    p.genero${categorySelect},
                     p.descripcion,
                     p.notas_olfativas,
                     p.precio,
                     p.stock,
                     p.unidades_vendidas,
                     p.imagen_url,
-                    COALESCE(p.es_nuevo, false) AS es_nuevo,
+                    ${esNuevoExpr},
                     pr.id AS promo_id,
                     pr.nombre AS promo_nombre,
                     pr.porcentaje_descuento,
@@ -770,6 +917,7 @@ const getRelatedProducts = async (req, res) => {
                 : '(p.precio * (pr.porcentaje_descuento / 100.0))'}))::numeric, 2)
                     END AS precio_con_descuento
                 FROM Productos p
+                ${categoryJoin}
                 LEFT JOIN Promociones pr
                     ON pr.id = p.promocion_id
                     AND pr.activo = true
@@ -816,7 +964,7 @@ exports.getRelatedProducts = getRelatedProducts;
 const updateProduct = async (req, res) => {
     try {
         const { id } = req.params;
-        const { nombre, genero, descripcion, notas_olfativas, notas, precio, stock, es_nuevo } = req.body;
+        const { nombre, genero, descripcion, notas_olfativas, notas, precio, stock, es_nuevo, nuevo_hasta } = req.body;
         const hasValue = (val) => val !== undefined && val !== null && val !== '';
         const notasFinal = hasValue(notas_olfativas) ? notas_olfativas : (hasValue(notas) ? notas : undefined);
         let imagen_url;
@@ -837,13 +985,27 @@ const updateProduct = async (req, res) => {
         }
         const updates = [];
         const params = [];
+        const categoriesOk = await detectCategoriesSchema();
+        const newUntilOk = await detectProductNewUntilSchema();
         if (hasValue(nombre)) {
             updates.push('nombre = ?');
             params.push(nombre);
         }
         if (hasValue(genero)) {
+            const generoNormalized = normalizeCategorySlug(genero);
+            if (!generoNormalized) {
+                res.status(400).json({ error: 'Categoria invalida' });
+                return;
+            }
+            if (categoriesOk) {
+                const exists = await ensureCategoryExists(generoNormalized);
+                if (!exists) {
+                    res.status(400).json({ error: 'Categoria invalida. Crea la categoria primero en Admin > Categorias.' });
+                    return;
+                }
+            }
             updates.push('genero = ?');
-            params.push(genero);
+            params.push(generoNormalized);
         }
         if (hasValue(descripcion)) {
             updates.push('descripcion = ?');
@@ -864,6 +1026,17 @@ const updateProduct = async (req, res) => {
         if (es_nuevo !== undefined) {
             updates.push('es_nuevo = ?');
             params.push(!!es_nuevo);
+        }
+        const nuevoHastaParsed = parseNuevoHastaInput(nuevo_hasta);
+        if (nuevoHastaParsed !== undefined) {
+            if (!newUntilOk) {
+                res.status(400).json({
+                    error: 'Tu base de datos no soporta expiración de etiqueta NUEVO. Ejecuta database/migrations/20260312_products_new_badge_expiration.sql en Supabase y vuelve a intentar.'
+                });
+                return;
+            }
+            updates.push('nuevo_hasta = ?');
+            params.push(nuevoHastaParsed);
         }
         if (imagen_url) {
             updates.push('imagen_url = ?');
@@ -931,6 +1104,43 @@ const parseGenero = (raw) => {
         return 'unisex';
     return 'unisex';
 };
+const slugifyCategory = (name) => {
+    return String(name || '')
+        .trim()
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 120);
+};
+const parseCategorySlugFromImport = (raw, categoriesOk, validCategorySlugs) => {
+    const rawStr = String(raw ?? '').trim();
+    if (!rawStr) {
+        if (categoriesOk && validCategorySlugs.size > 0 && !validCategorySlugs.has('unisex')) {
+            return { slug: null, error: 'Categoria es requerida (no existe categoria "unisex")' };
+        }
+        return { slug: 'unisex' };
+    }
+    // 1) Si ya viene un slug
+    const normalized = normalizeCategorySlug(rawStr);
+    if (normalized && (!categoriesOk || validCategorySlugs.has(normalized))) {
+        return { slug: normalized };
+    }
+    // 2) Intentar mapear "genero" clasico
+    const gender = parseGenero(rawStr);
+    if (!categoriesOk || validCategorySlugs.has(gender)) {
+        return { slug: gender };
+    }
+    // 3) Intentar slugify de nombre
+    const slug = slugifyCategory(rawStr);
+    if (slug && validCategorySlugs.has(slug)) {
+        return { slug };
+    }
+    return { slug: null, error: `Categoria no existe: ${rawStr}` };
+};
 const parseNumberFlexible = (raw) => {
     if (raw === null || raw === undefined)
         return null;
@@ -979,7 +1189,8 @@ const downloadProductImportTemplate = async (req, res) => {
     try {
         const header = [
             'nombre',
-            'genero',
+            // slug de categoria (ej: mujer, hombre, unisex)
+            'categoria',
             'notas_olfativas',
             'descripcion',
             'precio',
@@ -1021,6 +1232,28 @@ const importProductsFromSpreadsheet = async (req, res) => {
     }
     const dryRun = String(req.query?.dry_run || '').toLowerCase() === 'true';
     try {
+        const categoriesSchemaOk = await detectCategoriesSchema();
+        const validSlugs = new Set();
+        if (categoriesSchemaOk) {
+            try {
+                const [cRows] = await database_1.pool.query('SELECT slug FROM Categorias');
+                for (const r of (cRows || [])) {
+                    const s = String(r?.slug || '').trim().toLowerCase();
+                    if (s)
+                        validSlugs.add(s);
+                }
+            }
+            catch {
+                // ignore
+            }
+        }
+        if (categoriesSchemaOk && validSlugs.size === 0) {
+            res.status(400).json({
+                error: 'Tu base de datos soporta categorias, pero no hay categorias creadas. Crea al menos una categoria en Admin > Categorias antes de importar.'
+            });
+            return;
+        }
+        const categoriesOk = categoriesSchemaOk && validSlugs.size > 0;
         const workbook = XLSX.read(file.buffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
         if (!sheetName) {
@@ -1056,6 +1289,7 @@ const importProductsFromSpreadsheet = async (req, res) => {
             const descripcionRaw = getRowValue(r, ['descripcion', 'description', 'desc', 'descrip']);
             const notasRaw = getRowValue(r, ['notas_olfativas', 'notas', 'notes', 'notasolfativas']);
             const generoRaw = getRowValue(r, ['genero', 'gender']);
+            const categoriaRaw = getRowValue(r, ['categoria', 'category', 'categoria_slug']);
             const stockRaw = getRowValue(r, ['stock', 'inventario', 'cantidad']);
             const imagenRaw = getRowValue(r, ['imagen_url', 'image_url', 'imagen', 'image', 'url_imagen', 'imageurl']);
             const vendidasRaw = getRowValue(r, ['unidades_vendidas', 'vendidas', 'ventas', 'unidades']);
@@ -1084,7 +1318,12 @@ const importProductsFromSpreadsheet = async (req, res) => {
                 errors.push({ row: excelRow, field: 'descripcion', message: 'Descripcion es requerida (min 10 caracteres)' });
                 continue;
             }
-            const genero = parseGenero(generoRaw);
+            const parsed = parseCategorySlugFromImport(categoriaRaw !== undefined ? categoriaRaw : generoRaw, categoriesOk, validSlugs);
+            if (!parsed.slug) {
+                errors.push({ row: excelRow, field: 'categoria', message: parsed.error || 'Categoria invalida' });
+                continue;
+            }
+            const genero = parsed.slug;
             const stockN = parseNumberFlexible(stockRaw);
             const vendidasN = parseNumberFlexible(vendidasRaw);
             const stock = stockN === null ? 0 : Math.max(0, Math.trunc(stockN));

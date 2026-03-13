@@ -70,3 +70,31 @@ export const requireRole = (roles: string[]) => {
         next();
     };
 };
+
+// Permisos dinamicos por rol (RBAC)
+export const requirePermission = (permission: string) => {
+    return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+        if (!req.user) {
+            res.status(403).json({ error: 'Acceso Denegado. Permisos insuficientes.' });
+            return;
+        }
+
+        const role = String(req.user.rol || '').toUpperCase();
+        if (role === 'SUPERADMIN') {
+            next();
+            return;
+        }
+
+        try {
+            const { PermissionsService } = await import('../services/permissions.service');
+            const ok = await PermissionsService.roleHasPermission(role, permission as any);
+            if (!ok) {
+                res.status(403).json({ error: 'Acceso Denegado. Permisos insuficientes.' });
+                return;
+            }
+            next();
+        } catch {
+            res.status(403).json({ error: 'Acceso Denegado. Permisos insuficientes.' });
+        }
+    };
+};

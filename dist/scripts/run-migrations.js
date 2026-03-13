@@ -47,7 +47,22 @@ const migrations = [
     '20260312_settings_instagram_token.sql',
     '20260312_settings_boutique_contact.sql',
     '20260312_reviews.sql',
-    '20260312_orders_add_processing.sql'
+    '20260312_orders_add_processing.sql',
+    '20260312_role_permissions.sql',
+    '20260312_settings_payment_accounts.sql',
+    '20260312_settings_wompi_config.sql',
+    '20260312_settings_wompi_secret_encrypted.sql',
+    '20260312_categories.sql',
+    '20260312_products_category_slug_length.sql',
+    '20260312_promotions_category_slug.sql',
+    '20260312_settings_multimedia_hero.sql',
+    '20260312_settings_checkout_addons.sql',
+    '20260312_orders_checkout_addons.sql',
+    '20260312_products_new_badge_expiration.sql',
+    '20260312_settings_checkout_addons_images.sql',
+    '20260312_recommendation_events.sql',
+    '20260312_settings_hero_multimedia.sql',
+    '20260312_settings_banner_accent_color.sql'
 ];
 async function runMigrations() {
     console.log('🚀 Iniciando aplicación de migraciones pendientes...');

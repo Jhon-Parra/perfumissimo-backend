@@ -8,6 +8,42 @@ const upload_middleware_1 = require("../middleware/upload.middleware");
 let promotionAssignmentReady = null;
 let promotionMediaReady = null;
 let promotionAdvancedReady = null;
+let promotionGenderReady = null;
+let categoriesReady = null;
+const detectCategoriesSchema = async () => {
+    if (categoriesReady !== null)
+        return categoriesReady;
+    try {
+        const [rows] = await database_1.pool.query("SELECT to_regclass('categorias') IS NOT NULL AS ok");
+        categoriesReady = !!rows?.[0]?.ok;
+        return categoriesReady;
+    }
+    catch {
+        categoriesReady = false;
+        return false;
+    }
+};
+const slugify = (name) => {
+    return String(name || '')
+        .trim()
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 120);
+};
+const ensureCategoryExists = async (slug) => {
+    try {
+        const [rows] = await database_1.pool.query('SELECT 1 AS ok FROM Categorias WHERE slug = $1 LIMIT 1', [slug]);
+        return !!rows?.[0]?.ok;
+    }
+    catch {
+        return false;
+    }
+};
 const detectPromotionAssignmentSchema = async () => {
     if (promotionAssignmentReady !== null)
         return promotionAssignmentReady;
@@ -60,6 +96,24 @@ const detectPromotionMediaSchema = async () => {
         return false;
     }
 };
+const detectPromotionGenderSchema = async () => {
+    if (promotionGenderReady !== null)
+        return promotionGenderReady;
+    try {
+        const [rows] = await database_1.pool.query(`SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'promociones' AND column_name = 'product_gender'
+                ) AS has_product_gender`);
+        promotionGenderReady = !!rows?.[0]?.has_product_gender;
+        return promotionGenderReady;
+    }
+    catch {
+        promotionGenderReady = false;
+        return false;
+    }
+};
 const detectPromotionAdvancedSchema = async () => {
     if (promotionAdvancedReady !== null)
         return promotionAdvancedReady;
@@ -97,6 +151,7 @@ const createPromotion = async (req, res) => {
         const assignmentReady = await detectPromotionAssignmentSchema();
         const mediaReady = await detectPromotionMediaSchema();
         const advancedReady = await detectPromotionAdvancedSchema();
+        const categoriesOk = await detectCategoriesSchema();
         if (!assignmentReady) {
             res.status(400).json({ error: 'Tu base de datos no soporta reglas de asignacion de promociones. Aplica la migracion primero.' });
             return;
@@ -139,6 +194,23 @@ const createPromotion = async (req, res) => {
             const amount = dtype === 'AMOUNT' ? Number(amount_discount || 0) : null;
             const prio = advancedReady ? Number(priority || 0) : 0;
             if (mediaReady) {
+                const scope = (product_scope || 'GLOBAL');
+                const categorySlug = scope === 'GENDER' ? slugify(product_gender || '') : '';
+                if (scope === 'GENDER') {
+                    if (!categorySlug) {
+                        await connection.query('ROLLBACK');
+                        res.status(400).json({ error: 'Debes seleccionar una categoria' });
+                        return;
+                    }
+                    if (categoriesOk) {
+                        const exists = await ensureCategoryExists(categorySlug);
+                        if (!exists) {
+                            await connection.query('ROLLBACK');
+                            res.status(400).json({ error: 'Categoria invalida. Crea la categoria primero en Admin > Categorias.' });
+                            return;
+                        }
+                    }
+                }
                 await connection.query(`INSERT INTO Promociones (
                         id, nombre, descripcion, imagen_url, porcentaje_descuento${advancedReady ? ', discount_type, amount_discount, priority' : ''}, fecha_inicio, fecha_fin,
                         product_scope, product_gender, audience_scope, audience_segment, activo
@@ -152,8 +224,8 @@ const createPromotion = async (req, res) => {
                     ...(advancedReady ? [dtype, amount, prio] : []),
                     fecha_inicio,
                     fecha_fin,
-                    product_scope || 'GLOBAL',
-                    (product_scope || 'GLOBAL') === 'GENDER' ? (product_gender || null) : null,
+                    scope,
+                    scope === 'GENDER' ? categorySlug : null,
                     audience_scope || 'ALL',
                     audience_segment || null,
                     activo ?? true
@@ -209,8 +281,22 @@ const getPromotions = async (_req, res) => {
     try {
         const assignmentReady = await detectPromotionAssignmentSchema();
         const mediaReady = await detectPromotionMediaSchema();
+        const genderReady = await detectPromotionGenderSchema();
         const advancedReady = await detectPromotionAdvancedSchema();
         if (assignmentReady) {
+            const genderOr = genderReady
+                ? `
+                    OR (
+                      COALESCE(pr.product_scope, 'GLOBAL') = 'GENDER'
+                      AND pr.product_gender IS NOT NULL
+                      AND EXISTS (
+                        SELECT 1
+                        FROM Productos p
+                        WHERE p.genero = pr.product_gender
+                          AND p.stock > 0
+                      )
+                    )`
+                : '';
             const [rows] = await database_1.pool.query(`
                 SELECT id, nombre, descripcion${mediaReady ? ', imagen_url' : ''}, porcentaje_descuento${advancedReady ? ', discount_type, amount_discount, priority' : ''}, fecha_inicio, fecha_fin, activo
                 FROM Promociones pr
@@ -222,10 +308,11 @@ const getPromotions = async (_req, res) => {
                   )
                   AND pr.fecha_inicio <= NOW()
                   AND pr.fecha_fin >= NOW()
-                  AND pr.audience_scope = 'ALL'
+                  AND COALESCE(pr.audience_scope, 'ALL') = 'ALL'
                   AND (
-                    pr.product_scope = 'GLOBAL'
+                    COALESCE(pr.product_scope, 'GLOBAL') = 'GLOBAL'
                     OR EXISTS (SELECT 1 FROM PromocionProductos pp WHERE pp.promocion_id = pr.id)
+                    ${genderOr}
                     OR EXISTS (SELECT 1 FROM Productos p WHERE p.promocion_id = pr.id)
                   )
                 ORDER BY ${advancedReady ? 'pr.priority DESC, COALESCE(pr.amount_discount, 0) DESC, pr.porcentaje_descuento DESC,' : 'pr.porcentaje_descuento DESC,'} pr.creado_en DESC
@@ -312,6 +399,7 @@ const updatePromotion = async (req, res) => {
         const assignmentReady = await detectPromotionAssignmentSchema();
         const mediaReady = await detectPromotionMediaSchema();
         const advancedReady = await detectPromotionAdvancedSchema();
+        const categoriesOk = await detectCategoriesSchema();
         if (!assignmentReady) {
             res.status(400).json({ error: 'Tu base de datos no soporta reglas de asignacion de promociones. Aplica la migracion primero.' });
             return;
@@ -398,9 +486,25 @@ const updatePromotion = async (req, res) => {
                 params.push(product_scope);
             }
             if (mediaReady) {
-                if (product_gender !== undefined) {
+                if (product_gender !== undefined && (product_scope === undefined || product_scope === 'GENDER')) {
+                    const normalized = product_gender ? slugify(String(product_gender)) : '';
+                    if (product_scope === 'GENDER' || (product_scope === undefined && normalized)) {
+                        if (!normalized) {
+                            await connection.query('ROLLBACK');
+                            res.status(400).json({ error: 'Debes seleccionar una categoria' });
+                            return;
+                        }
+                        if (categoriesOk) {
+                            const exists = await ensureCategoryExists(normalized);
+                            if (!exists) {
+                                await connection.query('ROLLBACK');
+                                res.status(400).json({ error: 'Categoria invalida. Crea la categoria primero en Admin > Categorias.' });
+                                return;
+                            }
+                        }
+                    }
                     updates.push('product_gender = $' + (params.length + 1));
-                    params.push(product_gender || null);
+                    params.push(normalized || null);
                 }
                 if (product_scope !== undefined && product_scope !== 'GENDER') {
                     updates.push('product_gender = $' + (params.length + 1));

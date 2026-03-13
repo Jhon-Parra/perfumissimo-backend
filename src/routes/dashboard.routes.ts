@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import { getDashboardSummary } from '../controllers/dashboard.controller';
-import { verifyToken, requireRole } from '../middleware/auth.middleware';
+import { verifyToken, requirePermission } from '../middleware/auth.middleware';
 
 const router = Router();
 
-router.get('/summary', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'VENTAS', 'PRODUCTOS']), getDashboardSummary);
+router.get('/summary', verifyToken, requirePermission('admin.dashboard'), getDashboardSummary);
 
 export default router;

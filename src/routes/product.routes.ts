@@ -13,7 +13,7 @@ import {
     getRelatedProducts
 } from '../controllers/product.controller';
 import { uploadSingleImage, uploadSingleSpreadsheet } from '../middleware/upload.middleware';
-import { verifyToken, requireRole, optionalVerifyToken } from '../middleware/auth.middleware';
+import { verifyToken, requirePermission, optionalVerifyToken } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validation.middleware';
 import { createProductSchema, updateProductSchema } from '../schemas/product.schema';
 
@@ -23,16 +23,16 @@ router.get('/catalog', optionalVerifyToken, getPublicCatalog);
 router.get('/newest', optionalVerifyToken, getNewestProducts);
 router.get('/', getProducts);
 
-router.get('/low-stock', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'VENTAS', 'PRODUCTOS']), getLowStockProducts);
+router.get('/low-stock', verifyToken, requirePermission('admin.products'), getLowStockProducts);
 
-router.get('/import/template', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'PRODUCTOS']), downloadProductImportTemplate);
+router.get('/import/template', verifyToken, requirePermission('admin.products'), downloadProductImportTemplate);
 
 router.get('/:id/related', optionalVerifyToken, getRelatedProducts);
 router.get('/:id', optionalVerifyToken, getProductById);
 
-router.post('/', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'PRODUCTOS']), uploadSingleImage, validate(createProductSchema), createProduct);
-router.post('/import', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'PRODUCTOS']), uploadSingleSpreadsheet, importProductsFromSpreadsheet);
-router.put('/:id', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'PRODUCTOS']), uploadSingleImage, validate(updateProductSchema), updateProduct);
-router.delete('/:id', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'PRODUCTOS']), deleteProduct);
+router.post('/', verifyToken, requirePermission('admin.products'), uploadSingleImage, validate(createProductSchema), createProduct);
+router.post('/import', verifyToken, requirePermission('admin.products'), uploadSingleSpreadsheet, importProductsFromSpreadsheet);
+router.put('/:id', verifyToken, requirePermission('admin.products'), uploadSingleImage, validate(updateProductSchema), updateProduct);
+router.delete('/:id', verifyToken, requirePermission('admin.products'), deleteProduct);
 
 export default router;

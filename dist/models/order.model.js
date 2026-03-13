@@ -3,15 +3,123 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.OrderModel = void 0;
 const database_1 = require("../config/database");
 const uuid_1 = require("uuid");
+const round2 = (n) => Math.round(n * 100) / 100;
+const detectAddonConfigColumns = async () => {
+    try {
+        const [rows] = await database_1.pool.query(`SELECT COUNT(*)::int AS cnt
+             FROM information_schema.columns
+             WHERE table_name = 'configuracionglobal'
+               AND column_name IN ('envio_prioritario_precio','perfume_lujo_precio')`);
+        return Number(rows?.[0]?.cnt || 0) >= 2;
+    }
+    catch {
+        return false;
+    }
+};
+const getAddonConfig = async () => {
+    const supported = await detectAddonConfigColumns();
+    if (!supported) {
+        return { envio_prioritario_precio: 0, perfume_lujo_precio: 0, supported: false };
+    }
+    try {
+        const [rows] = await database_1.pool.query('SELECT COALESCE(envio_prioritario_precio, 0) AS envio_prioritario_precio, COALESCE(perfume_lujo_precio, 0) AS perfume_lujo_precio FROM ConfiguracionGlobal WHERE id = 1');
+        const r = rows?.[0] || {};
+        const ep = Number(r.envio_prioritario_precio || 0);
+        const pl = Number(r.perfume_lujo_precio || 0);
+        return {
+            envio_prioritario_precio: Number.isFinite(ep) && ep > 0 ? ep : 0,
+            perfume_lujo_precio: Number.isFinite(pl) && pl > 0 ? pl : 0,
+            supported: true
+        };
+    }
+    catch {
+        return { envio_prioritario_precio: 0, perfume_lujo_precio: 0, supported: true };
+    }
+};
+const detectOrderAddonColumns = async () => {
+    try {
+        const [rows] = await database_1.pool.query(`SELECT column_name
+             FROM information_schema.columns
+             WHERE table_name = 'ordenes'
+               AND column_name IN ('subtotal_productos','envio_prioritario','costo_envio_prioritario','perfume_lujo','costo_perfume_lujo')`);
+        const cols = new Set((rows || []).map((r) => String(r.column_name)));
+        return {
+            subtotal_productos: cols.has('subtotal_productos'),
+            envio_prioritario: cols.has('envio_prioritario'),
+            costo_envio_prioritario: cols.has('costo_envio_prioritario'),
+            perfume_lujo: cols.has('perfume_lujo'),
+            costo_perfume_lujo: cols.has('costo_perfume_lujo')
+        };
+    }
+    catch {
+        return {
+            subtotal_productos: false,
+            envio_prioritario: false,
+            costo_envio_prioritario: false,
+            perfume_lujo: false,
+            costo_perfume_lujo: false
+        };
+    }
+};
+const computeSubtotal = (items) => {
+    return round2((items || []).reduce((sum, it) => {
+        const qty = Math.max(0, Math.trunc(Number(it?.quantity || 0)));
+        const price = Number(it?.price || 0);
+        if (!qty || !Number.isFinite(price) || price < 0)
+            return sum;
+        return sum + (price * qty);
+    }, 0));
+};
 class OrderModel {
+    static async getOrderStatus(orderId) {
+        const id = String(orderId || '').trim();
+        if (!id)
+            return null;
+        const [rows] = await database_1.pool.query('SELECT estado FROM ordenes WHERE id = $1 LIMIT 1', [id]);
+        const estado = String(rows?.[0]?.estado || '').trim();
+        return estado || null;
+    }
     static async createOrder(orderData) {
         const connection = await database_1.pool.getConnection();
         try {
             await connection.query('BEGIN');
             const orderId = (0, uuid_1.v4)();
+            const subtotal_productos = computeSubtotal(orderData.items);
+            if (!Number.isFinite(subtotal_productos) || subtotal_productos <= 0) {
+                throw new Error('Total de la orden inválido');
+            }
+            const addons = await getAddonConfig();
+            const envio_prioritario = !!orderData.envio_prioritario;
+            const perfume_lujo = !!orderData.perfume_lujo;
+            const costo_envio_prioritario = envio_prioritario ? round2(addons.envio_prioritario_precio) : 0;
+            const costo_perfume_lujo = perfume_lujo ? round2(addons.perfume_lujo_precio) : 0;
+            const total = round2(subtotal_productos + costo_envio_prioritario + costo_perfume_lujo);
+            const addonCols = await detectOrderAddonColumns();
             // Insertar orden principal — nombres de columnas reales de la BD
-            await connection.query(`INSERT INTO ordenes (id, usuario_id, total, direccion_envio, estado, codigo_transaccion)
-                 VALUES ($1, $2, $3, $4, 'PENDIENTE', $5)`, [orderId, orderData.user_id, orderData.total, orderData.shipping_address, orderData.transaction_code || null]);
+            const cols = ['id', 'usuario_id', 'total', 'direccion_envio', 'estado', 'codigo_transaccion'];
+            const vals = [orderId, orderData.user_id, total, orderData.shipping_address, 'PENDIENTE', orderData.transaction_code || null];
+            if (addonCols.subtotal_productos) {
+                cols.push('subtotal_productos');
+                vals.push(subtotal_productos);
+            }
+            if (addonCols.envio_prioritario) {
+                cols.push('envio_prioritario');
+                vals.push(envio_prioritario);
+            }
+            if (addonCols.costo_envio_prioritario) {
+                cols.push('costo_envio_prioritario');
+                vals.push(costo_envio_prioritario);
+            }
+            if (addonCols.perfume_lujo) {
+                cols.push('perfume_lujo');
+                vals.push(perfume_lujo);
+            }
+            if (addonCols.costo_perfume_lujo) {
+                cols.push('costo_perfume_lujo');
+                vals.push(costo_perfume_lujo);
+            }
+            const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+            await connection.query(`INSERT INTO ordenes (${cols.join(', ')}) VALUES (${placeholders})`, vals);
             // Insertar cada ítem de la orden
             for (const item of orderData.items) {
                 const itemId = (0, uuid_1.v4)();
@@ -24,7 +132,15 @@ class OrderModel {
                 }
             }
             await connection.query('COMMIT');
-            return orderId;
+            return {
+                orderId,
+                subtotal_productos,
+                envio_prioritario,
+                costo_envio_prioritario,
+                perfume_lujo,
+                costo_perfume_lujo,
+                total
+            };
         }
         catch (error) {
             await connection.query('ROLLBACK');
@@ -35,13 +151,33 @@ class OrderModel {
         }
     }
     static async getUserOrders(userId) {
+        const addonCols = await detectOrderAddonColumns();
+        const extraSelect = [
+            addonCols.subtotal_productos ? 'o.subtotal_productos' : null,
+            addonCols.envio_prioritario ? 'o.envio_prioritario' : null,
+            addonCols.costo_envio_prioritario ? 'o.costo_envio_prioritario' : null,
+            addonCols.perfume_lujo ? 'o.perfume_lujo' : null,
+            addonCols.costo_perfume_lujo ? 'o.costo_perfume_lujo' : null
+        ].filter(Boolean).join(', ');
+        const groupBy = ['o.id'];
+        if (addonCols.subtotal_productos)
+            groupBy.push('o.subtotal_productos');
+        if (addonCols.envio_prioritario)
+            groupBy.push('o.envio_prioritario');
+        if (addonCols.costo_envio_prioritario)
+            groupBy.push('o.costo_envio_prioritario');
+        if (addonCols.perfume_lujo)
+            groupBy.push('o.perfume_lujo');
+        if (addonCols.costo_perfume_lujo)
+            groupBy.push('o.costo_perfume_lujo');
         const [rows] = await database_1.pool.query(`SELECT 
                 o.id,
                 o.total,
                 o.estado,
                 o.direccion_envio,
                 o.codigo_transaccion,
-                o.creado_en,
+                o.creado_en
+                ${extraSelect ? `, ${extraSelect}` : ''},
                 JSON_AGG(
                     JSON_BUILD_OBJECT(
                         'producto_id', d.producto_id,
@@ -56,7 +192,7 @@ class OrderModel {
             JOIN detalle_ordenes d ON d.orden_id = o.id
             JOIN productos p ON p.id = d.producto_id
             WHERE o.usuario_id = $1
-            GROUP BY o.id
+            GROUP BY ${groupBy.join(', ')}
             ORDER BY o.creado_en DESC`, [userId]);
         return rows;
     }
@@ -133,9 +269,17 @@ class OrderModel {
         }
     }
     static async getOrderById(orderId, userId) {
+        const addonCols = await detectOrderAddonColumns();
+        const extraSelect = [
+            addonCols.subtotal_productos ? 'o.subtotal_productos' : null,
+            addonCols.envio_prioritario ? 'o.envio_prioritario' : null,
+            addonCols.costo_envio_prioritario ? 'o.costo_envio_prioritario' : null,
+            addonCols.perfume_lujo ? 'o.perfume_lujo' : null,
+            addonCols.costo_perfume_lujo ? 'o.costo_perfume_lujo' : null
+        ].filter(Boolean).join(', ');
         let query = `
             SELECT 
-                o.id, o.total, o.estado, o.direccion_envio, o.codigo_transaccion, o.creado_en,
+                o.id, o.total, o.estado, o.direccion_envio, o.codigo_transaccion, o.creado_en${extraSelect ? `, ${extraSelect}` : ''},
                 JSON_AGG(
                     JSON_BUILD_OBJECT(
                         'producto_id', d.producto_id,
@@ -155,18 +299,49 @@ class OrderModel {
             query += ` AND o.usuario_id = $2`;
             params.push(userId);
         }
-        query += ` GROUP BY o.id`;
+        const groupBy = ['o.id'];
+        if (addonCols.subtotal_productos)
+            groupBy.push('o.subtotal_productos');
+        if (addonCols.envio_prioritario)
+            groupBy.push('o.envio_prioritario');
+        if (addonCols.costo_envio_prioritario)
+            groupBy.push('o.costo_envio_prioritario');
+        if (addonCols.perfume_lujo)
+            groupBy.push('o.perfume_lujo');
+        if (addonCols.costo_perfume_lujo)
+            groupBy.push('o.costo_perfume_lujo');
+        query += ` GROUP BY ${groupBy.join(', ')}`;
         const [rows] = await database_1.pool.query(query, params);
         return rows[0] || null;
     }
     static async getAdminOrderById(orderId) {
+        const addonCols = await detectOrderAddonColumns();
+        const extraSelect = [
+            addonCols.subtotal_productos ? 'o.subtotal_productos' : null,
+            addonCols.envio_prioritario ? 'o.envio_prioritario' : null,
+            addonCols.costo_envio_prioritario ? 'o.costo_envio_prioritario' : null,
+            addonCols.perfume_lujo ? 'o.perfume_lujo' : null,
+            addonCols.costo_perfume_lujo ? 'o.costo_perfume_lujo' : null
+        ].filter(Boolean).join(', ');
+        const groupBy = ['o.id', 'u.nombre', 'u.apellido', 'u.email', 'u.telefono'];
+        if (addonCols.subtotal_productos)
+            groupBy.push('o.subtotal_productos');
+        if (addonCols.envio_prioritario)
+            groupBy.push('o.envio_prioritario');
+        if (addonCols.costo_envio_prioritario)
+            groupBy.push('o.costo_envio_prioritario');
+        if (addonCols.perfume_lujo)
+            groupBy.push('o.perfume_lujo');
+        if (addonCols.costo_perfume_lujo)
+            groupBy.push('o.costo_perfume_lujo');
         const [rows] = await database_1.pool.query(`SELECT 
                 o.id,
                 o.total,
                 o.estado,
                 o.direccion_envio,
                 o.codigo_transaccion,
-                o.creado_en,
+                o.creado_en
+                ${extraSelect ? `, ${extraSelect}` : ''},
                 u.nombre || ' ' || u.apellido AS cliente_nombre,
                 u.email AS cliente_email,
                 u.telefono AS cliente_telefono,
@@ -186,7 +361,7 @@ class OrderModel {
             JOIN detalle_ordenes d ON d.orden_id = o.id
             JOIN productos p ON p.id = d.producto_id
             WHERE o.id = $1
-            GROUP BY o.id, u.nombre, u.apellido, u.email, u.telefono`, [orderId]);
+            GROUP BY ${groupBy.join(', ')}`, [orderId]);
         return rows?.[0] || null;
     }
 }

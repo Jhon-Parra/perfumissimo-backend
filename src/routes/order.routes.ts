@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { OrderController } from '../controllers/order.controller';
-import { verifyToken, requireRole } from '../middleware/auth.middleware';
+import { verifyToken, requirePermission } from '../middleware/auth.middleware';
 import { createOrderLimiter } from '../middleware/security.middleware';
 
 const router = Router();
@@ -11,8 +11,8 @@ router.get('/my-orders', verifyToken, OrderController.getMyOrders);
 router.get('/my-orders/:id', verifyToken, OrderController.getMyOrderById);
 
 // Rutas para administradores (ver todas las órdenes y actualizar estados)
-router.get('/', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'VENTAS']), OrderController.getAllOrders);
-router.get('/:id', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'VENTAS']), OrderController.getOrderByIdAdmin);
-router.put('/:id/status', verifyToken, requireRole(['SUPERADMIN', 'ADMIN', 'VENTAS']), OrderController.updateOrderStatus);
+router.get('/', verifyToken, requirePermission('admin.orders'), OrderController.getAllOrders);
+router.get('/:id', verifyToken, requirePermission('admin.orders'), OrderController.getOrderByIdAdmin);
+router.put('/:id/status', verifyToken, requirePermission('admin.orders'), OrderController.updateOrderStatus);
 
 export default router;

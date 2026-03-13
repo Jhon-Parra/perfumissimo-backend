@@ -3,6 +3,45 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getFavorites = exports.removeFavorite = exports.addFavorite = void 0;
 const database_1 = require("../config/database");
 const uuid_1 = require("uuid");
+const detectFavoritesSchema = async () => {
+    try {
+        const [tRows] = await database_1.pool.query(`SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND lower(table_name) = 'favoritos'
+            ) AS ok`);
+        const ok = !!tRows?.[0]?.ok;
+        if (!ok)
+            return { ok: false, createdCol: null };
+        const [cRows] = await database_1.pool.query(`SELECT column_name
+             FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND lower(table_name) = 'favoritos'
+               AND column_name IN ('creado_en', 'created_at')`);
+        const cols = new Set((cRows || []).map((r) => String(r.column_name)));
+        const createdCol = cols.has('creado_en') ? 'creado_en' : (cols.has('created_at') ? 'created_at' : null);
+        return { ok: true, createdCol };
+    }
+    catch {
+        return { ok: false, createdCol: null };
+    }
+};
+const detectProductNewUntilSchema = async () => {
+    try {
+        const [rows] = await database_1.pool.query(`SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND lower(table_name) = 'productos'
+                  AND column_name = 'nuevo_hasta'
+            ) AS ok`);
+        return !!rows?.[0]?.ok;
+    }
+    catch {
+        return false;
+    }
+};
 const addFavorite = async (req, res) => {
     try {
         const userId = req.user?.id;
@@ -13,6 +52,13 @@ const addFavorite = async (req, res) => {
         }
         if (!producto_id) {
             res.status(400).json({ error: 'Producto ID es requerido' });
+            return;
+        }
+        const favSchema = await detectFavoritesSchema();
+        if (!favSchema.ok) {
+            res.status(400).json({
+                error: 'La tabla de favoritos no existe en la base de datos. Crea la tabla Favoritos en Supabase (schema_postgres.sql) y vuelve a intentar.'
+            });
             return;
         }
         const id = (0, uuid_1.v4)();
@@ -33,6 +79,13 @@ const removeFavorite = async (req, res) => {
             res.status(401).json({ error: 'Usuario no autenticado' });
             return;
         }
+        const favSchema = await detectFavoritesSchema();
+        if (!favSchema.ok) {
+            res.status(400).json({
+                error: 'La tabla de favoritos no existe en la base de datos.'
+            });
+            return;
+        }
         await database_1.pool.query(`DELETE FROM favoritos WHERE usuario_id = $1 AND producto_id = $2`, [userId, productId]);
         res.status(200).json({ message: 'Producto eliminado de favoritos' });
     }
@@ -49,6 +102,22 @@ const getFavorites = async (req, res) => {
             res.status(401).json({ error: 'Usuario no autenticado' });
             return;
         }
+        const favSchema = await detectFavoritesSchema();
+        if (!favSchema.ok) {
+            // Para no romper el frontend si aun no se aplica la tabla
+            res.status(200).json([]);
+            return;
+        }
+        const newUntilOk = await detectProductNewUntilSchema();
+        const esNuevoExpr = newUntilOk
+            ? `CASE
+                WHEN COALESCE(p.es_nuevo, false) = false THEN false
+                WHEN p.nuevo_hasta IS NULL THEN true
+                WHEN p.nuevo_hasta >= NOW() THEN true
+                ELSE false
+               END AS es_nuevo`
+            : 'COALESCE(p.es_nuevo, false) AS es_nuevo';
+        const orderCol = favSchema.createdCol ? `f.${favSchema.createdCol}` : 'f.id';
         const [rows] = await database_1.pool.query(`SELECT
                 p.id,
                 p.nombre,
@@ -60,11 +129,11 @@ const getFavorites = async (req, res) => {
                 p.imagen_url,
                 p.unidades_vendidas,
                 p.creado_en,
-                (p.id IN (SELECT id FROM Productos ORDER BY creado_en DESC NULLS LAST, id DESC LIMIT 5)) AS es_nuevo
+                ${esNuevoExpr}
             FROM favoritos f
             JOIN productos p ON f.producto_id = p.id
             WHERE f.usuario_id = $1
-            ORDER BY f.creado_en DESC`, [userId]);
+            ORDER BY ${orderCol} DESC NULLS LAST`, [userId]);
         res.status(200).json(rows);
     }
     catch (error) {

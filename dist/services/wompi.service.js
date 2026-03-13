@@ -1,21 +1,91 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.WompiService = void 0;
-const getBaseUrl = () => {
-    const env = (process.env.WOMPI_ENV || 'sandbox').toLowerCase();
+const database_1 = require("../config/database");
+const encryption_util_1 = require("../utils/encryption.util");
+const baseUrlForEnv = (env) => {
     return env === 'production' ? 'https://production.wompi.co/v1' : 'https://sandbox.wompi.co/v1';
 };
-const requirePublicKey = () => {
-    const key = String(process.env.WOMPI_PUBLIC_KEY || '').trim();
-    if (!key) {
+let cachedCfg = null;
+let cachedAt = 0;
+const CACHE_MS = 60_000;
+const normalizeEnv = (raw) => {
+    const v = String(raw || '').trim().toLowerCase();
+    return v === 'production' ? 'production' : 'sandbox';
+};
+const resolveConfig = async () => {
+    const now = Date.now();
+    if (cachedCfg && now - cachedAt < CACHE_MS)
+        return cachedCfg;
+    const envFromProcess = normalizeEnv(process.env.WOMPI_ENV || 'sandbox');
+    const publicFromProcess = String(process.env.WOMPI_PUBLIC_KEY || '').trim();
+    const privateFromProcess = String(process.env.WOMPI_PRIVATE_KEY || '').trim();
+    if (publicFromProcess) {
+        const apiKey = privateFromProcess || publicFromProcess;
+        cachedCfg = {
+            env: envFromProcess,
+            publicKey: publicFromProcess,
+            apiKey,
+            baseUrl: baseUrlForEnv(envFromProcess),
+            hasPrivateKey: !!privateFromProcess
+        };
+        cachedAt = now;
+        return cachedCfg;
+    }
+    // Fallback: leer desde ConfiguracionGlobal (si existe)
+    try {
+        const result = await database_1.pool.query('SELECT wompi_env, wompi_public_key, wompi_private_key_enc, wompi_private_key_iv, wompi_private_key_tag FROM ConfiguracionGlobal WHERE id = 1');
+        const rows = result?.[0] || result?.rows || result;
+        const row = Array.isArray(rows) ? rows[0] : undefined;
+        const env = normalizeEnv(row?.wompi_env);
+        const publicKey = String(row?.wompi_public_key || '').trim();
+        const enc = String(row?.wompi_private_key_enc || '').trim();
+        const iv = String(row?.wompi_private_key_iv || '').trim();
+        const tag = String(row?.wompi_private_key_tag || '').trim();
+        let privateKey = '';
+        if (enc && iv && tag) {
+            privateKey = (0, encryption_util_1.decryptString)({ enc, iv, tag });
+        }
+        const apiKey = privateKey || publicKey;
+        if (!publicKey) {
+            throw new Error('WOMPI_PUBLIC_KEY no esta configurado');
+        }
+        if (!apiKey) {
+            throw new Error('WOMPI API key no esta configurado');
+        }
+        cachedCfg = {
+            env,
+            publicKey,
+            apiKey,
+            baseUrl: baseUrlForEnv(env),
+            hasPrivateKey: !!privateKey
+        };
+        cachedAt = now;
+        return cachedCfg;
+    }
+    catch (e) {
+        const msg = String(e?.message || '').trim();
+        if (msg.startsWith('SETTINGS_ENCRYPTION_KEY')) {
+            throw new Error(msg);
+        }
+        if (msg.startsWith('WOMPI_')) {
+            throw new Error(msg);
+        }
         throw new Error('WOMPI_PUBLIC_KEY no esta configurado');
     }
-    return key;
 };
 exports.WompiService = {
+    async getClientConfig() {
+        const cfg = await resolveConfig();
+        return { env: cfg.env, public_key: cfg.publicKey, base_url: cfg.baseUrl };
+    },
+    async hasPrivateKey() {
+        const cfg = await resolveConfig();
+        return !!cfg.hasPrivateKey;
+    },
     async getMerchant() {
-        const publicKey = requirePublicKey();
-        const url = `${getBaseUrl()}/merchants/${encodeURIComponent(publicKey)}`;
+        const cfg = await resolveConfig();
+        const url = `${cfg.baseUrl}/merchants/${encodeURIComponent(cfg.publicKey)}`;
         const resp = await fetch(url, { method: 'GET' });
         if (!resp.ok) {
             const text = await resp.text().catch(() => '');
@@ -30,12 +100,12 @@ exports.WompiService = {
         return { acceptance_token: token, permalink, name: json?.data?.name };
     },
     async getPseBanks() {
-        const publicKey = requirePublicKey();
-        const url = `${getBaseUrl()}/pse/financial_institutions`;
+        const cfg = await resolveConfig();
+        const url = `${cfg.baseUrl}/pse/financial_institutions`;
         const resp = await fetch(url, {
             method: 'GET',
             headers: {
-                Authorization: `Bearer ${publicKey}`
+                Authorization: `Bearer ${cfg.apiKey}`
             }
         });
         if (!resp.ok) {
@@ -49,8 +119,8 @@ exports.WompiService = {
             .sort((a, b) => a.financial_institution_name.localeCompare(b.financial_institution_name, 'es'));
     },
     async createPseTransaction(input) {
-        const publicKey = requirePublicKey();
-        const url = `${getBaseUrl()}/transactions`;
+        const cfg = await resolveConfig();
+        const url = `${cfg.baseUrl}/transactions`;
         const body = {
             amount_in_cents: input.amount_in_cents,
             currency: 'COP',
@@ -71,7 +141,7 @@ exports.WompiService = {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${publicKey}`
+                Authorization: `Bearer ${cfg.apiKey}`
             },
             body: JSON.stringify(body)
         });
@@ -87,15 +157,84 @@ exports.WompiService = {
         }
         return { transaction_id: txId, async_payment_url: asyncUrl, status: json?.data?.status };
     },
+    async createNequiTransaction(input) {
+        const cfg = await resolveConfig();
+        const url = `${cfg.baseUrl}/transactions`;
+        const body = {
+            amount_in_cents: input.amount_in_cents,
+            currency: 'COP',
+            acceptance_token: input.acceptance_token,
+            reference: input.reference,
+            customer_email: input.customer_email,
+            payment_method: {
+                type: 'NEQUI',
+                phone_number: input.phone_number,
+                payment_description: input.payment_description
+            }
+        };
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${cfg.apiKey}`
+            },
+            body: JSON.stringify(body)
+        });
+        if (!resp.ok) {
+            const text = await resp.text().catch(() => '');
+            throw new Error(`Wompi create transaction error (${resp.status}): ${text}`);
+        }
+        const json = (await resp.json());
+        const txId = String(json?.data?.id || '').trim();
+        if (!txId) {
+            throw new Error('Respuesta Wompi invalida: falta transaction id');
+        }
+        return { transaction_id: txId, status: json?.data?.status };
+    },
+    async createCardTransaction(input) {
+        const cfg = await resolveConfig();
+        const url = `${cfg.baseUrl}/transactions`;
+        const body = {
+            amount_in_cents: input.amount_in_cents,
+            currency: 'COP',
+            acceptance_token: input.acceptance_token,
+            reference: input.reference,
+            customer_email: input.customer_email,
+            redirect_url: input.redirect_url,
+            payment_method: {
+                type: 'CARD',
+                installments: input.installments,
+                token: input.token
+            }
+        };
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${cfg.apiKey}`
+            },
+            body: JSON.stringify(body)
+        });
+        if (!resp.ok) {
+            const text = await resp.text().catch(() => '');
+            throw new Error(`Wompi create transaction error (${resp.status}): ${text}`);
+        }
+        const json = (await resp.json());
+        const txId = String(json?.data?.id || '').trim();
+        if (!txId) {
+            throw new Error('Respuesta Wompi invalida: falta transaction id');
+        }
+        return { transaction_id: txId, status: json?.data?.status };
+    },
     async getTransaction(transactionId) {
-        const publicKey = requirePublicKey();
+        const cfg = await resolveConfig();
         const id = String(transactionId || '').trim();
         if (!id)
             throw new Error('transaction id requerido');
-        const url = `${getBaseUrl()}/transactions/${encodeURIComponent(id)}`;
+        const url = `${cfg.baseUrl}/transactions/${encodeURIComponent(id)}`;
         const resp = await fetch(url, {
             method: 'GET',
-            headers: { Authorization: `Bearer ${publicKey}` }
+            headers: { Authorization: `Bearer ${cfg.apiKey}` }
         });
         if (!resp.ok) {
             const text = await resp.text().catch(() => '');

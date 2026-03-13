@@ -10,7 +10,7 @@ router.post('/', security_middleware_1.createOrderLimiter, auth_middleware_1.ver
 router.get('/my-orders', auth_middleware_1.verifyToken, order_controller_1.OrderController.getMyOrders);
 router.get('/my-orders/:id', auth_middleware_1.verifyToken, order_controller_1.OrderController.getMyOrderById);
 // Rutas para administradores (ver todas las órdenes y actualizar estados)
-router.get('/', auth_middleware_1.verifyToken, (0, auth_middleware_1.requireRole)(['SUPERADMIN', 'ADMIN', 'VENTAS']), order_controller_1.OrderController.getAllOrders);
-router.get('/:id', auth_middleware_1.verifyToken, (0, auth_middleware_1.requireRole)(['SUPERADMIN', 'ADMIN', 'VENTAS']), order_controller_1.OrderController.getOrderByIdAdmin);
-router.put('/:id/status', auth_middleware_1.verifyToken, (0, auth_middleware_1.requireRole)(['SUPERADMIN', 'ADMIN', 'VENTAS']), order_controller_1.OrderController.updateOrderStatus);
+router.get('/', auth_middleware_1.verifyToken, (0, auth_middleware_1.requirePermission)('admin.orders'), order_controller_1.OrderController.getAllOrders);
+router.get('/:id', auth_middleware_1.verifyToken, (0, auth_middleware_1.requirePermission)('admin.orders'), order_controller_1.OrderController.getOrderByIdAdmin);
+router.put('/:id/status', auth_middleware_1.verifyToken, (0, auth_middleware_1.requirePermission)('admin.orders'), order_controller_1.OrderController.updateOrderStatus);
 exports.default = router;

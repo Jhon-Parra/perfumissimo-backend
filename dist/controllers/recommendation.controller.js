@@ -1,0 +1,394 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.recordRecommendationEvent = exports.recommendSimilar = exports.recommendFromFreeText = exports.recommendFromQuiz = void 0;
+const openai_1 = __importDefault(require("openai"));
+const database_1 = require("../config/database");
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const openai = new openai_1.default({
+    apiKey: GROQ_API_KEY || '',
+    baseURL: 'https://api.groq.com/openai/v1'
+});
+let categoriesReady = null;
+const detectCategoriesSchema = async () => {
+    if (categoriesReady !== null)
+        return categoriesReady;
+    try {
+        const [rows] = await database_1.pool.query("SELECT to_regclass('categorias') IS NOT NULL AS ok");
+        categoriesReady = !!rows?.[0]?.ok;
+        return categoriesReady;
+    }
+    catch {
+        categoriesReady = false;
+        return false;
+    }
+};
+let recoEventsReady = null;
+const detectRecoEventsSchema = async () => {
+    if (recoEventsReady !== null)
+        return recoEventsReady;
+    try {
+        const [rows] = await database_1.pool.query("SELECT to_regclass('recomendacioneventos') IS NOT NULL AS ok");
+        recoEventsReady = !!rows?.[0]?.ok;
+        return recoEventsReady;
+    }
+    catch {
+        recoEventsReady = false;
+        return false;
+    }
+};
+const normalizeText = (raw) => {
+    return String(raw || '')
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9\s-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+};
+const tokenize = (raw) => {
+    const s = normalizeText(raw);
+    if (!s)
+        return [];
+    return s.split(' ').filter(Boolean);
+};
+const unique = (arr) => Array.from(new Set(arr));
+const buildKeywordHintsFromQuiz = (answers) => {
+    const a = answers || {};
+    const hints = [];
+    const aroma = String(a.aroma || '').toLowerCase();
+    if (aroma === 'dulce')
+        hints.push('vainilla', 'ambar', 'caramelo', 'gourmand', 'tonka');
+    if (aroma === 'fresco')
+        hints.push('fresco', 'limpio', 'acuatico', 'verde', 'aromatico');
+    if (aroma === 'amaderado')
+        hints.push('madera', 'cedro', 'sandal', 'vetiver', 'oud');
+    if (aroma === 'floral')
+        hints.push('floral', 'jazmin', 'rosa', 'azahar', 'peonia');
+    if (aroma === 'citrico')
+        hints.push('citrico', 'limon', 'bergamota', 'mandarina', 'naranja');
+    if (aroma === 'oriental')
+        hints.push('especias', 'incienso', 'ambar', 'vainilla', 'resina');
+    const intensity = String(a.intensity || '').toLowerCase();
+    if (intensity === 'suave')
+        hints.push('suave', 'ligero', 'sutil');
+    if (intensity === 'moderada')
+        hints.push('equilibrado', 'versatil');
+    if (intensity === 'fuerte')
+        hints.push('intenso', 'proyeccion', 'larga duracion');
+    const occasion = String(a.occasion || '').toLowerCase();
+    if (occasion === 'diario')
+        hints.push('diario', 'versatil');
+    if (occasion === 'trabajo')
+        hints.push('elegante', 'limpio', 'no invasivo');
+    if (occasion === 'fiesta')
+        hints.push('noche', 'seductor', 'intenso');
+    if (occasion === 'citas')
+        hints.push('romantico', 'sensual');
+    if (occasion === 'eventos')
+        hints.push('sofisticado', 'lujo');
+    const climate = String(a.climate || '').toLowerCase();
+    if (climate === 'calido')
+        hints.push('calido', 'fresco', 'citrico', 'acuatico');
+    if (climate === 'templado')
+        hints.push('templado', 'versatil');
+    if (climate === 'frio')
+        hints.push('frio', 'ambar', 'vainilla', 'amaderado');
+    return unique(hints);
+};
+const computeHeuristicScore = (p, tokens, preferGenero) => {
+    const haystack = normalizeText(`${p.nombre} ${p.descripcion || ''} ${p.notas_olfativas || ''} ${p.categoria_nombre || ''} ${p.genero || ''}`);
+    let score = 0;
+    for (const t of tokens) {
+        if (!t || t.length < 3)
+            continue;
+        if (haystack.includes(t))
+            score += 1;
+    }
+    const vend = Number(p.unidades_vendidas || 0);
+    if (Number.isFinite(vend) && vend > 0)
+        score += Math.min(4, vend / 50);
+    if (preferGenero && p.genero && String(p.genero).toLowerCase() === String(preferGenero).toLowerCase()) {
+        score += 2.5;
+    }
+    return score;
+};
+const selectCandidates = async (opts) => {
+    const hasCategories = await detectCategoriesSchema();
+    const join = hasCategories ? 'LEFT JOIN Categorias c ON c.slug = p.genero' : '';
+    const categorySelect = hasCategories ? ', c.nombre AS categoria_nombre, c.slug AS categoria_slug' : '';
+    const whereParts = ['p.stock > 0'];
+    const params = [];
+    if (opts.preferGenero && String(opts.preferGenero).trim().toLowerCase() !== 'unisex') {
+        whereParts.push('p.genero = $' + (params.length + 1));
+        params.push(String(opts.preferGenero).trim().toLowerCase());
+    }
+    const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
+    const [rows] = await database_1.pool.query(`SELECT p.id, p.nombre, p.genero, p.descripcion, p.notas_olfativas, p.precio, p.stock, p.unidades_vendidas, p.imagen_url${categorySelect}
+         FROM Productos p
+         ${join}
+         ${whereSql}
+         ORDER BY COALESCE(p.unidades_vendidas, 0) DESC, p.creado_en DESC
+         LIMIT 120`, params);
+    return rows || [];
+};
+const safeParseJsonObject = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s)
+        return null;
+    const first = s.indexOf('{');
+    const last = s.lastIndexOf('}');
+    if (first < 0 || last < 0 || last <= first)
+        return null;
+    const slice = s.slice(first, last + 1);
+    try {
+        return JSON.parse(slice);
+    }
+    catch {
+        return null;
+    }
+};
+const runAiRanking = async (payload) => {
+    if (!GROQ_API_KEY)
+        return null;
+    if (!payload.candidates?.length)
+        return [];
+    const system = 'Eres un asesor experto en perfumeria de lujo para e-commerce. Devuelve SOLO JSON valido, sin markdown. ' +
+        'No inventes productos; solo puedes recomendar IDs presentes en candidates. ' +
+        'Maximo 6 recomendaciones. reasons deben ser cortas y concretas.';
+    const candidatesLite = payload.candidates.map((p) => ({
+        id: p.id,
+        nombre: p.nombre,
+        genero: p.genero,
+        categoria_nombre: p.categoria_nombre || null,
+        precio: Number(p.precio || 0),
+        notas_olfativas: p.notas_olfativas || '',
+        descripcion: (p.descripcion || '').slice(0, 180)
+    }));
+    const user = {
+        mode: payload.mode,
+        user_text: payload.user_text,
+        quiz_answers: payload.quiz_answers || null,
+        base_product: payload.base_product || null,
+        candidates: candidatesLite
+    };
+    const prompt = 'Analiza user_text y/o quiz_answers y devuelve un ranking de perfumes. ' +
+        'Formato exacto:\n' +
+        '{"recommendations":[{"id":"<uuid>","rank":1,"reasons":["...","..."],"short_explanation":"..."}]}' +
+        '\nReglas:\n' +
+        '- rank empieza en 1\n' +
+        '- reasons: 2 a 4 bullets cortos (sin emojis)\n' +
+        '- short_explanation: max 140 caracteres\n' +
+        '- solo IDs existentes\n' +
+        '- no repitas perfumes\n';
+    const resp = await openai.chat.completions.create({
+        model: 'llama-3.1-8b-instant',
+        messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: prompt + '\nINPUT:\n' + JSON.stringify(user) }
+        ],
+        temperature: 0.3,
+        max_tokens: 900
+    });
+    const content = resp.choices?.[0]?.message?.content || '';
+    const parsed = safeParseJsonObject(content);
+    const list = parsed?.recommendations;
+    if (!Array.isArray(list))
+        return null;
+    const seen = new Set();
+    const items = [];
+    for (const it of list) {
+        const id = String(it?.id || '').trim();
+        if (!id || seen.has(id))
+            continue;
+        seen.add(id);
+        const reasons = Array.isArray(it?.reasons) ? it.reasons.map((r) => String(r).trim()).filter(Boolean).slice(0, 4) : [];
+        const short = String(it?.short_explanation || '').trim();
+        const rank = Math.max(1, Math.trunc(Number(it?.rank || items.length + 1)));
+        items.push({ id, rank, reasons, short_explanation: short });
+        if (items.length >= 6)
+            break;
+    }
+    return items;
+};
+const recordEvent = async (req, event_type, payload, session_id) => {
+    try {
+        const ok = await detectRecoEventsSchema();
+        if (!ok)
+            return;
+        const ua = String(req.headers['user-agent'] || '').slice(0, 800);
+        await database_1.pool.query('INSERT INTO RecomendacionEventos (usuario_id, session_id, event_type, payload, user_agent) VALUES ($1, $2, $3, $4, $5)', [null, session_id || null, event_type, payload ?? null, ua || null]);
+    }
+    catch {
+        // ignore
+    }
+};
+const buildResponse = (candidatesById, reco) => {
+    const out = [];
+    let rank = 1;
+    for (const it of reco) {
+        const p = candidatesById.get(it.id);
+        if (!p)
+            continue;
+        out.push({
+            rank: it.rank || rank,
+            reasons: it.reasons || [],
+            short_explanation: it.short_explanation || '',
+            product: {
+                id: p.id,
+                nombre: p.nombre,
+                precio: Number(p.precio || 0),
+                imagen_url: p.imagen_url,
+                genero: p.genero,
+                categoria_nombre: p.categoria_nombre || null,
+                categoria_slug: p.categoria_slug || null
+            }
+        });
+        rank++;
+    }
+    return out;
+};
+const recommendFromQuiz = async (req, res) => {
+    try {
+        const session_id = String(req.body?.session_id || '').trim() || undefined;
+        const answers = req.body?.answers || {};
+        const preferGenero = String(answers?.for_who || '').trim().toLowerCase() || null;
+        const candidates = await selectCandidates({ preferGenero });
+        const baseTokens = unique([
+            ...tokenize(req.body?.free_text || ''),
+            ...buildKeywordHintsFromQuiz(answers)
+        ]);
+        const scored = candidates
+            .map((p) => ({ p, s: computeHeuristicScore(p, baseTokens, preferGenero) }))
+            .sort((a, b) => b.s - a.s)
+            .slice(0, 50);
+        const top = scored.map((x) => x.p);
+        const candidatesById = new Map(top.map((p) => [p.id, p]));
+        const userText = `Respuestas quiz: ${JSON.stringify(answers)}`;
+        const ai = await runAiRanking({ mode: 'quiz', user_text: userText, quiz_answers: answers, candidates: top });
+        let reco;
+        if (ai && ai.length) {
+            reco = ai;
+        }
+        else {
+            reco = scored.slice(0, 6).map((x, idx) => ({
+                id: x.p.id,
+                rank: idx + 1,
+                reasons: ['Compatible con tus preferencias', 'Basado en notas y descripcion'],
+                short_explanation: 'Seleccionado por afinidad con tu perfil',
+                score: x.s
+            }));
+        }
+        recordEvent(req, 'quiz_submit', { answers, tokens: baseTokens.slice(0, 30), candidates: top.length }, session_id);
+        res.status(200).json({
+            mode: 'quiz',
+            recommendations: buildResponse(candidatesById, reco).slice(0, 6)
+        });
+    }
+    catch (e) {
+        res.status(500).json({ error: e?.message || 'No se pudo generar recomendacion' });
+    }
+};
+exports.recommendFromQuiz = recommendFromQuiz;
+const recommendFromFreeText = async (req, res) => {
+    try {
+        const session_id = String(req.body?.session_id || '').trim() || undefined;
+        const query = String(req.body?.query || '').trim();
+        const tokens = unique(tokenize(query));
+        const candidates = await selectCandidates({});
+        const scored = candidates
+            .map((p) => ({ p, s: computeHeuristicScore(p, tokens) }))
+            .sort((a, b) => b.s - a.s)
+            .slice(0, 50);
+        const top = scored.map((x) => x.p);
+        const candidatesById = new Map(top.map((p) => [p.id, p]));
+        const ai = await runAiRanking({ mode: 'free', user_text: query, candidates: top });
+        const reco = (ai && ai.length)
+            ? ai
+            : scored.slice(0, 6).map((x, idx) => ({
+                id: x.p.id,
+                rank: idx + 1,
+                reasons: ['Coincide con tu busqueda', 'Basado en notas y descripcion'],
+                short_explanation: 'Seleccionado por afinidad con tu descripcion',
+                score: x.s
+            }));
+        recordEvent(req, 'free_query', { query, tokens: tokens.slice(0, 40), candidates: top.length }, session_id);
+        res.status(200).json({
+            mode: 'free',
+            recommendations: buildResponse(candidatesById, reco).slice(0, 6)
+        });
+    }
+    catch (e) {
+        res.status(500).json({ error: e?.message || 'No se pudo generar recomendacion' });
+    }
+};
+exports.recommendFromFreeText = recommendFromFreeText;
+const recommendSimilar = async (req, res) => {
+    try {
+        const session_id = String(req.body?.session_id || '').trim() || undefined;
+        const productId = String(req.params?.id || '').trim();
+        if (!productId) {
+            res.status(400).json({ error: 'Producto invalido' });
+            return;
+        }
+        const hasCategories = await detectCategoriesSchema();
+        const join = hasCategories ? 'LEFT JOIN Categorias c ON c.slug = p.genero' : '';
+        const categorySelect = hasCategories ? ', c.nombre AS categoria_nombre, c.slug AS categoria_slug' : '';
+        const [rows] = await database_1.pool.query(`SELECT p.id, p.nombre, p.genero, p.descripcion, p.notas_olfativas, p.precio, p.stock, p.unidades_vendidas, p.imagen_url${categorySelect}
+             FROM Productos p
+             ${join}
+             WHERE p.id = $1
+             LIMIT 1`, [productId]);
+        const base = rows?.[0];
+        if (!base) {
+            res.status(404).json({ error: 'Producto no encontrado' });
+            return;
+        }
+        const baseTokens = unique(tokenize(`${base.nombre} ${base.descripcion || ''} ${base.notas_olfativas || ''}`));
+        const candidates = await selectCandidates({ preferGenero: base.genero || null });
+        const filtered = candidates.filter((p) => p.id !== base.id);
+        const scored = filtered
+            .map((p) => ({ p, s: computeHeuristicScore(p, baseTokens, base.genero || null) }))
+            .sort((a, b) => b.s - a.s)
+            .slice(0, 50);
+        const top = scored.map((x) => x.p);
+        const candidatesById = new Map(top.map((p) => [p.id, p]));
+        const ai = await runAiRanking({ mode: 'similar', user_text: 'Perfumes similares', base_product: base, candidates: top });
+        const reco = (ai && ai.length)
+            ? ai
+            : scored.slice(0, 6).map((x, idx) => ({
+                id: x.p.id,
+                rank: idx + 1,
+                reasons: ['Similar por notas/estilo', 'Misma categoria o perfil cercano'],
+                short_explanation: 'Alternativa similar',
+                score: x.s
+            }));
+        recordEvent(req, 'similar', { base_product_id: base.id, candidates: top.length }, session_id);
+        res.status(200).json({
+            base_product: {
+                id: base.id,
+                nombre: base.nombre
+            },
+            recommendations: buildResponse(candidatesById, reco).slice(0, 6)
+        });
+    }
+    catch (e) {
+        res.status(500).json({ error: e?.message || 'No se pudo generar recomendacion' });
+    }
+};
+exports.recommendSimilar = recommendSimilar;
+const recordRecommendationEvent = async (req, res) => {
+    try {
+        const session_id = String(req.body?.session_id || '').trim() || undefined;
+        const event_type = String(req.body?.event_type || '').trim();
+        const payload = req.body?.payload;
+        await recordEvent(req, event_type, payload, session_id);
+        res.status(200).json({ ok: true });
+    }
+    catch {
+        res.status(200).json({ ok: true });
+    }
+};
+exports.recordRecommendationEvent = recordRecommendationEvent;

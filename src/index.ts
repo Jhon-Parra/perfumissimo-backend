@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import authRoutes from './routes/auth.routes';
 import aiRoutes from './routes/ai.routes';
+import recommendationRoutes from './routes/recommendation.routes';
 import productRoutes from './routes/product.routes';
 import promotionRoutes from './routes/promotion.routes';
 import orderRoutes from './routes/order.routes';
@@ -16,6 +17,8 @@ import reviewRoutes from './routes/review.routes';
 import socialRoutes from './routes/social.routes';
 import dashboardRoutes from './routes/dashboard.routes';
 import paymentRoutes from './routes/payment.routes';
+import permissionsRoutes from './routes/permissions.routes';
+import categoryRoutes from './routes/category.routes';
 import { generalLimiter, authLimiter, aiLimiter, createOrderLimiter } from './middleware/security.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import path from 'path';
@@ -29,7 +32,11 @@ const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '::');
 const disableAuthLimiter = process.env.DISABLE_AUTH_LIMIT === 'true';
 
-app.use(helmet());
+// Permitir que el frontend (mismo site, distinto puerto en dev) pueda cargar recursos (imagenes/video)
+// desde el backend sin bloqueo por Cross-Origin-Resource-Policy.
+app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
 app.use(morgan('combined'));
 app.use(cookieParser());
 
@@ -123,7 +130,8 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-app.use('/uploads', express.static(path.join(__dirname, '../../uploads')));
+// Servir uploads desde backend/uploads tanto en dev (ts-node) como en prod (dist)
+app.use('/uploads', express.static(path.resolve(__dirname, '..', 'uploads')));
 
 app.use('/api', generalLimiter);
 if (!disableAuthLimiter) {
@@ -137,6 +145,7 @@ app.use('/api/ai/generate-description', aiLimiter);
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/recommendations', recommendationRoutes);
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/users', userRoutes);
@@ -146,6 +155,8 @@ app.use('/api/reviews', reviewRoutes);
 app.use('/api/social', socialRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/permissions', permissionsRoutes);
+app.use('/api/categories', categoryRoutes);
 
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'OK', message: 'Perfumissimo API is running' });

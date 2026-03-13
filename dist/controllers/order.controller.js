@@ -11,12 +11,8 @@ class OrderController {
                 res.status(401).json({ message: 'Usuario no autenticado' });
                 return;
             }
-            const { total, shipping_address, items, transaction_code } = req.body;
+            const { shipping_address, items, transaction_code, envio_prioritario, perfume_lujo } = req.body;
             // Validaciones
-            if (!total || total <= 0) {
-                res.status(400).json({ message: 'Total de la orden inválido' });
-                return;
-            }
             if (!shipping_address || shipping_address.trim() === '') {
                 res.status(400).json({ message: 'La dirección de envío es requerida' });
                 return;
@@ -27,15 +23,16 @@ class OrderController {
             }
             const orderData = {
                 user_id,
-                total,
                 shipping_address: shipping_address.trim(),
                 items,
-                transaction_code
+                transaction_code,
+                envio_prioritario: !!envio_prioritario,
+                perfume_lujo: !!perfume_lujo
             };
-            const orderId = await order_model_1.OrderModel.createOrder(orderData);
+            const created = await order_model_1.OrderModel.createOrder(orderData);
             // Notificación (no bloquear respuesta)
-            (0, order_notification_service_1.notifyOrderCreated)(orderId).catch((e) => console.error('Order email error:', e));
-            res.status(201).json({ message: 'Orden creada exitosamente', orderId });
+            (0, order_notification_service_1.notifyOrderCreated)(created.orderId).catch((e) => console.error('Order email error:', e));
+            res.status(201).json({ message: 'Orden creada exitosamente', orderId: created.orderId });
         }
         catch (error) {
             console.error('Error al crear orden:', error);

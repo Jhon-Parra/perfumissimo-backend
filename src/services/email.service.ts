@@ -9,6 +9,7 @@ type MailOptions = {
 };
 
 let transporter: nodemailer.Transporter | null = null;
+let warnedNotConfigured = false;
 
 type SenderConfig = {
     from: string;
@@ -122,18 +123,30 @@ const getTransporter = (): nodemailer.Transporter => {
 export const sendEmail = async (options: MailOptions): Promise<void> => {
     if (!isEmailConfigured()) {
         // No romper el flujo de pedidos si no hay SMTP
+        if (!warnedNotConfigured) {
+            warnedNotConfigured = true;
+            console.warn('[email] SMTP no configurado. Omitiendo envio de correos. Configura SMTP_* en .env');
+        }
         return;
     }
 
     const sender = await resolveSenderConfig();
     const t = getTransporter();
-    await t.sendMail({
-        from: sender.from,
-        to: options.to,
-        replyTo: sender.replyTo,
-        bcc: sender.bccOrders,
-        subject: options.subject,
-        html: options.html,
-        text: options.text
-    });
+    try {
+        console.log(`[EmailService] Intentando enviar correo a: ${options.to} con asunto: "${options.subject}"`);
+        const info = await t.sendMail({
+            from: sender.from,
+            to: options.to,
+            replyTo: sender.replyTo,
+            bcc: sender.bccOrders,
+            subject: options.subject,
+            html: options.html,
+            text: options.text
+        });
+        console.log(`[EmailService] ✅ Correo enviado exitosamente a ${options.to}. MessageId: ${info.messageId}`);
+    } catch (err: any) {
+        console.error(`[EmailService] ❌ Falla crítica al enviar correo a ${options.to}. Detalle:`, err?.message || err);
+        // No lanzamos (re-throw) el error para evitar que el request HTTP de checkout devuelva 500
+        // y el usuario piense que la orden falló por culpa del correo.
+    }
 };

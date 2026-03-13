@@ -12,13 +12,9 @@ export class OrderController {
                 return;
             }
 
-            const { total, shipping_address, items, transaction_code } = req.body;
+            const { shipping_address, items, transaction_code, envio_prioritario, perfume_lujo } = req.body;
 
             // Validaciones
-            if (!total || total <= 0) {
-                res.status(400).json({ message: 'Total de la orden inválido' });
-                return;
-            }
             if (!shipping_address || shipping_address.trim() === '') {
                 res.status(400).json({ message: 'La dirección de envío es requerida' });
                 return;
@@ -30,18 +26,19 @@ export class OrderController {
 
             const orderData: CreateOrderParams = {
                 user_id,
-                total,
                 shipping_address: shipping_address.trim(),
                 items,
-                transaction_code
+                transaction_code,
+                envio_prioritario: !!envio_prioritario,
+                perfume_lujo: !!perfume_lujo
             };
 
-            const orderId = await OrderModel.createOrder(orderData);
+            const created = await OrderModel.createOrder(orderData);
 
             // Notificación (no bloquear respuesta)
-            notifyOrderCreated(orderId).catch((e) => console.error('Order email error:', e));
+            notifyOrderCreated(created.orderId).catch((e) => console.error('Order email error:', e));
 
-            res.status(201).json({ message: 'Orden creada exitosamente', orderId });
+            res.status(201).json({ message: 'Orden creada exitosamente', orderId: created.orderId });
         } catch (error: any) {
             console.error('Error al crear orden:', error);
             if (typeof error?.message === 'string' && error.message.toLowerCase().includes('stock insuficiente')) {

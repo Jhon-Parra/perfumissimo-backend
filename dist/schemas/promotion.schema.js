@@ -40,7 +40,7 @@ exports.createPromotionSchema = zod_1.z.object({
     fecha_fin: zod_1.z.string().refine((val) => !isNaN(Date.parse(val)), 'Fecha de fin inválida'),
     // Reglas de asignacion
     product_scope: zod_1.z.enum(['GLOBAL', 'SPECIFIC', 'GENDER']).default('GLOBAL'),
-    product_gender: zod_1.z.enum(['mujer', 'hombre', 'unisex']).optional(),
+    product_gender: zod_1.z.preprocess((v) => (v === '' || v === null || v === undefined ? undefined : v), zod_1.z.string().min(1).max(120).optional()),
     product_ids: zod_1.z.preprocess(parseUuidArray, zod_1.z.array(zod_1.z.string().uuid()).optional()),
     audience_scope: zod_1.z.enum(['ALL', 'SEGMENT', 'CUSTOMERS']).default('ALL'),
     audience_segment: zod_1.z.string().min(1).max(100).optional(),
@@ -68,11 +68,11 @@ exports.createPromotionSchema = zod_1.z.object({
     path: ['product_ids']
 }).refine((data) => {
     if (data.product_scope === 'GENDER') {
-        return typeof data.product_gender === 'string' && ['mujer', 'hombre', 'unisex'].includes(data.product_gender);
+        return typeof data.product_gender === 'string' && data.product_gender.trim().length > 0;
     }
     return true;
 }, {
-    message: 'Debes seleccionar un genero',
+    message: 'Debes seleccionar una categoria',
     path: ['product_gender']
 }).refine((data) => {
     if (data.audience_scope === 'SEGMENT') {

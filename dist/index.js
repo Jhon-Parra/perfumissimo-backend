@@ -11,6 +11,7 @@ const morgan_1 = __importDefault(require("morgan"));
 const cookie_parser_1 = __importDefault(require("cookie-parser"));
 const auth_routes_1 = __importDefault(require("./routes/auth.routes"));
 const ai_routes_1 = __importDefault(require("./routes/ai.routes"));
+const recommendation_routes_1 = __importDefault(require("./routes/recommendation.routes"));
 const product_routes_1 = __importDefault(require("./routes/product.routes"));
 const promotion_routes_1 = __importDefault(require("./routes/promotion.routes"));
 const order_routes_1 = __importDefault(require("./routes/order.routes"));
@@ -21,6 +22,8 @@ const review_routes_1 = __importDefault(require("./routes/review.routes"));
 const social_routes_1 = __importDefault(require("./routes/social.routes"));
 const dashboard_routes_1 = __importDefault(require("./routes/dashboard.routes"));
 const payment_routes_1 = __importDefault(require("./routes/payment.routes"));
+const permissions_routes_1 = __importDefault(require("./routes/permissions.routes"));
+const category_routes_1 = __importDefault(require("./routes/category.routes"));
 const security_middleware_1 = require("./middleware/security.middleware");
 const error_middleware_1 = require("./middleware/error.middleware");
 const path_1 = __importDefault(require("path"));
@@ -31,7 +34,11 @@ const PORT = process.env.PORT || 3000;
 // Usar :: permite atender localhost en IPv6 y (cuando aplica) tambien IPv4.
 const HOST = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '::');
 const disableAuthLimiter = process.env.DISABLE_AUTH_LIMIT === 'true';
-app.use((0, helmet_1.default)());
+// Permitir que el frontend (mismo site, distinto puerto en dev) pueda cargar recursos (imagenes/video)
+// desde el backend sin bloqueo por Cross-Origin-Resource-Policy.
+app.use((0, helmet_1.default)({
+    crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
 app.use((0, morgan_1.default)('combined'));
 app.use((0, cookie_parser_1.default)());
 const defaultAllowedOrigins = [
@@ -111,7 +118,8 @@ app.use((req, res, next) => {
 });
 app.use(express_1.default.json({ limit: '10mb' }));
 app.use(express_1.default.urlencoded({ extended: true, limit: '10mb' }));
-app.use('/uploads', express_1.default.static(path_1.default.join(__dirname, '../../uploads')));
+// Servir uploads desde backend/uploads tanto en dev (ts-node) como en prod (dist)
+app.use('/uploads', express_1.default.static(path_1.default.resolve(__dirname, '..', 'uploads')));
 app.use('/api', security_middleware_1.generalLimiter);
 if (!disableAuthLimiter) {
     app.use('/api/auth/login', security_middleware_1.authLimiter);
@@ -123,6 +131,7 @@ app.use('/api/ai/generate-description', security_middleware_1.aiLimiter);
 app.use('/api/auth', auth_routes_1.default);
 app.use('/api/products', product_routes_1.default);
 app.use('/api/ai', ai_routes_1.default);
+app.use('/api/recommendations', recommendation_routes_1.default);
 app.use('/api/promotions', promotion_routes_1.default);
 app.use('/api/orders', order_routes_1.default);
 app.use('/api/users', user_routes_1.default);
@@ -132,6 +141,8 @@ app.use('/api/reviews', review_routes_1.default);
 app.use('/api/social', social_routes_1.default);
 app.use('/api/dashboard', dashboard_routes_1.default);
 app.use('/api/payments', payment_routes_1.default);
+app.use('/api/permissions', permissions_routes_1.default);
+app.use('/api/categories', category_routes_1.default);
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'OK', message: 'Perfumissimo API is running' });
 });

@@ -41,7 +41,10 @@ export const createPromotionSchema = z.object({
 
     // Reglas de asignacion
     product_scope: z.enum(['GLOBAL', 'SPECIFIC', 'GENDER']).default('GLOBAL'),
-    product_gender: z.enum(['mujer', 'hombre', 'unisex']).optional(),
+    product_gender: z.preprocess(
+        (v) => (v === '' || v === null || v === undefined ? undefined : v),
+        z.string().min(1).max(120).optional()
+    ),
     product_ids: z.preprocess(parseUuidArray, z.array(z.string().uuid()).optional()),
 
     audience_scope: z.enum(['ALL', 'SEGMENT', 'CUSTOMERS']).default('ALL'),
@@ -71,11 +74,11 @@ export const createPromotionSchema = z.object({
     path: ['product_ids']
 }).refine((data) => {
     if (data.product_scope === 'GENDER') {
-        return typeof data.product_gender === 'string' && ['mujer', 'hombre', 'unisex'].includes(data.product_gender);
+        return typeof data.product_gender === 'string' && data.product_gender.trim().length > 0;
     }
     return true;
 }, {
-    message: 'Debes seleccionar un genero',
+    message: 'Debes seleccionar una categoria',
     path: ['product_gender']
 }).refine((data) => {
     if (data.audience_scope === 'SEGMENT') {
