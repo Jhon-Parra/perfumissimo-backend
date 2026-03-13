@@ -5,33 +5,31 @@ import path from 'path';
 // Cargar variables de entorno antes de importar la base de datos o el email service
 dotenv.config({ path: path.join(__dirname, '../../.env') });
 
-const testEmailTarget = 'jhonjairoparraparra39@gmail.com';
+const testEmailTarget = 'jhon.parra@usantoto.edu.co';
 
 async function runTest() {
     console.log(`🚀 Iniciando prueba de envío de correo a: ${testEmailTarget}...`);
 
-    // Validar si las variables SMTP existen
-    if (!process.env.SMTP_USER || process.env.SMTP_USER === 'tu_correo@gmail.com' || !process.env.SMTP_PASS) {
-        console.error('❌ Error: Las credenciales SMTP no han sido configuradas correctamente en el archivo backend/.env');
-        console.error('Por favor, reemplaza "tu_correo@gmail.com" y "tu_contraseña_de_aplicacion" con datos reales de tu cuenta de correo.');
-        process.exit(1);
-    }
-
     try {
-        await sendEmail({
+        const result = await sendEmail({
             to: testEmailTarget,
-            subject: '📦 Prueba de integración de correo - Perfumissimo',
-            html: `
-                <div style="font-family: Arial, sans-serif; color: #333;">
-                    <h2 style="color: #2D4C3B;">¡Hola desde Perfumissimo!</h2>
-                    <p>Esta es una prueba de integración del sistema de correos.</p>
-                    <p>Si estás leyendo esto, significa que <strong>las credenciales SMTP que configuraste en tu archivo .env están funcionando perfectamente</strong>.</p>
-                    <br/>
-                    <p>Saludos,<br>El equipo de desarrollo.</p>
-                </div>
-            `,
-            text: 'Prueba de integración de correo exitosa. El sistema SMTP está configurado correctamente.'
+            subject: 'Prueba de integracion de correo - Perfumissimo',
+            text: `Prueba de integracion de correo exitosa.
+El sistema SMTP esta configurado correctamente.
+
+Saludos,
+El equipo de desarrollo.`
         });
+
+        if (result.skipped) {
+            console.error('❌ No se pudo enviar el correo de prueba. SMTP no configurado en el panel o .env');
+            process.exit(1);
+        }
+
+        if (!result.success) {
+            console.error('❌ No se pudo enviar el correo de prueba.', result.error || 'Sin detalle');
+            process.exit(1);
+        }
 
         console.log(`✅ Prueba enviada exitosamente. Por favor, revisa la bandeja de entrada de ${testEmailTarget} (y la carpeta de SPAM por si acaso).`);
         process.exit(0);

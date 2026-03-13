@@ -32,6 +32,15 @@ interface SettingsRow {
     email_reply_to?: string | null;
     email_bcc_orders?: string | null;
 
+    smtp_host?: string | null;
+    smtp_port?: number | null;
+    smtp_secure?: boolean | null;
+    smtp_user?: string | null;
+    smtp_from?: string | null;
+    smtp_pass_enc?: string | null;
+    smtp_pass_iv?: string | null;
+    smtp_pass_tag?: string | null;
+
     boutique_title?: string | null;
     boutique_address_line1?: string | null;
     boutique_address_line2?: string | null;
@@ -55,6 +64,7 @@ interface SettingsRow {
 
     // server-side only (no exponer al frontend)
     instagram_feed_configured?: boolean;
+    smtp_configured?: boolean;
 }
 
 const normalizeNullableString = (value: any, maxLen: number): string | null => {
@@ -130,6 +140,14 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
             'email_from_address',
             'email_reply_to',
             'email_bcc_orders',
+            'smtp_host',
+            'smtp_port',
+            'smtp_secure',
+            'smtp_user',
+            'smtp_from',
+            'smtp_pass_enc',
+            'smtp_pass_iv',
+            'smtp_pass_tag',
             'instagram_access_token',
             'boutique_title',
             'boutique_address_line1',
@@ -185,6 +203,12 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
         if (cols.email_reply_to) selectParts.push('email_reply_to');
         if (cols.email_bcc_orders) selectParts.push('email_bcc_orders');
 
+        if (cols.smtp_host) selectParts.push('smtp_host');
+        if (cols.smtp_port) selectParts.push('smtp_port');
+        if (cols.smtp_secure) selectParts.push('smtp_secure');
+        if (cols.smtp_user) selectParts.push('smtp_user');
+        if (cols.smtp_from) selectParts.push('smtp_from');
+
         if (cols.boutique_title) selectParts.push('boutique_title');
         if (cols.boutique_address_line1) selectParts.push('boutique_address_line1');
         if (cols.boutique_address_line2) selectParts.push('boutique_address_line2');
@@ -213,7 +237,8 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
         const settings: any = {
             ...rows[0],
             show_banner: !!rows[0].show_banner,
-            instagram_feed_configured: false
+            instagram_feed_configured: false,
+            smtp_configured: false
         };
 
         if (cols.instagram_access_token) {
@@ -224,6 +249,22 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
                 settings.instagram_feed_configured = !!cfgRows?.[0]?.configured;
             } catch {
                 settings.instagram_feed_configured = false;
+            }
+        }
+
+        if (cols.smtp_host && cols.smtp_user && cols.smtp_from && cols.smtp_pass_enc) {
+            try {
+                const [smtpRows] = await pool.query<any[]>(
+                    'SELECT smtp_pass_enc FROM ConfiguracionGlobal WHERE id = 1'
+                );
+                settings.smtp_configured = !!(
+                    String((rows[0] as any)?.smtp_host || '').trim() &&
+                    String((rows[0] as any)?.smtp_user || '').trim() &&
+                    String((rows[0] as any)?.smtp_from || '').trim() &&
+                    String(smtpRows?.[0]?.smtp_pass_enc || '').trim()
+                );
+            } catch {
+                settings.smtp_configured = false;
             }
         }
 
@@ -258,6 +299,12 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
             email_from_address,
             email_reply_to,
             email_bcc_orders,
+            smtp_host,
+            smtp_port,
+            smtp_secure,
+            smtp_user,
+            smtp_from,
+            smtp_pass,
 
             boutique_title,
             boutique_address_line1,
@@ -459,6 +506,14 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
             'email_from_address',
             'email_reply_to',
             'email_bcc_orders',
+            'smtp_host',
+            'smtp_port',
+            'smtp_secure',
+            'smtp_user',
+            'smtp_from',
+            'smtp_pass_enc',
+            'smtp_pass_iv',
+            'smtp_pass_tag',
             'boutique_title',
             'boutique_address_line1',
             'boutique_address_line2',
@@ -575,6 +630,46 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
                 normalizeNullableString(email_reply_to, 200),
                 normalizeNullableString(email_bcc_orders, 500)
             );
+        }
+
+        if (columns.smtp_host) {
+            query += `, smtp_host = ?, smtp_port = ?, smtp_secure = ?, smtp_user = ?, smtp_from = ?`;
+            const portValue = smtp_port !== undefined && smtp_port !== null && String(smtp_port).trim()
+                ? Math.max(1, Number(smtp_port))
+                : null;
+            params.push(
+                normalizeNullableString(smtp_host, 255),
+                Number.isFinite(portValue as number) ? portValue : null,
+                smtp_secure === undefined ? null : String(smtp_secure) === 'true',
+                normalizeNullableString(smtp_user, 200),
+                normalizeNullableString(smtp_from, 255)
+            );
+        }
+
+        if (smtp_pass !== undefined) {
+            if (!columns.smtp_pass_enc) {
+                res.status(400).json({
+                    error: 'Tu base de datos no soporta credenciales SMTP. Ejecuta database/migrations/20260313_settings_smtp_config.sql en Supabase y vuelve a intentar.'
+                });
+                return;
+            }
+
+            const passRaw = String(smtp_pass || '').trim();
+            if (!passRaw) {
+                query += `, smtp_pass_enc = ?, smtp_pass_iv = ?, smtp_pass_tag = ?`;
+                params.push(null, null, null);
+            } else {
+                try {
+                    const payload = encryptString(passRaw);
+                    query += `, smtp_pass_enc = ?, smtp_pass_iv = ?, smtp_pass_tag = ?`;
+                    params.push(payload.enc, payload.iv, payload.tag);
+                } catch (e: any) {
+                    res.status(400).json({
+                        error: e?.message || 'No se pudo cifrar la clave SMTP. Configura SETTINGS_ENCRYPTION_KEY en backend/.env'
+                    });
+                    return;
+                }
+            }
         }
 
         if (columns.boutique_title) {

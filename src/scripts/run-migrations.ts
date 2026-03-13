@@ -29,7 +29,10 @@ const migrations = [
     '20260312_settings_checkout_addons_images.sql',
     '20260312_recommendation_events.sql',
     '20260312_settings_hero_multimedia.sql',
-    '20260312_settings_banner_accent_color.sql'
+    '20260312_settings_banner_accent_color.sql',
+    '20260313_order_email_templates.sql',
+    '20260313_order_email_logs.sql',
+    '20260313_settings_smtp_config.sql'
 ];
 
 async function runMigrations() {
