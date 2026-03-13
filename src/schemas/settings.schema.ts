@@ -27,6 +27,7 @@ export const updateSettingsSchema = z.object({
     instagram_url: z.string().max(500).optional(),
     instagram_access_token: z.string().max(500).optional(),
     facebook_url: z.string().max(500).optional(),
+    tiktok_url: z.string().max(500).optional(),
     whatsapp_number: z.string().max(40).optional(),
     whatsapp_message: z.string().max(255).optional(),
 

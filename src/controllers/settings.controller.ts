@@ -21,6 +21,7 @@ interface SettingsRow {
 
     instagram_url?: string | null;
     facebook_url?: string | null;
+    tiktok_url?: string | null;
     whatsapp_number?: string | null;
     whatsapp_message?: string | null;
 
@@ -129,6 +130,7 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
             'logo_height_desktop',
             'instagram_url',
             'facebook_url',
+            'tiktok_url',
             'whatsapp_number',
             'whatsapp_message',
 
@@ -189,6 +191,7 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
 
         if (cols.instagram_url) selectParts.push('instagram_url');
         if (cols.facebook_url) selectParts.push('facebook_url');
+        if (cols.tiktok_url) selectParts.push('tiktok_url');
         if (cols.whatsapp_number) selectParts.push('whatsapp_number');
         if (cols.whatsapp_message) selectParts.push('whatsapp_message');
 
@@ -290,6 +293,7 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
             instagram_url,
             instagram_access_token,
             facebook_url,
+            tiktok_url,
             whatsapp_number,
             whatsapp_message,
 
@@ -494,6 +498,7 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
             'logo_height_desktop',
             'instagram_url',
             'facebook_url',
+            'tiktok_url',
             'whatsapp_number',
             'whatsapp_message',
 
@@ -576,6 +581,10 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
         if (columns.facebook_url) {
             query += `, facebook_url = ?`;
             params.push(normalizeNullableString(facebook_url, 500));
+        }
+        if (columns.tiktok_url) {
+            query += `, tiktok_url = ?`;
+            params.push(normalizeNullableString(tiktok_url, 500));
         }
         if (columns.whatsapp_number) {
             query += `, whatsapp_number = ?`;

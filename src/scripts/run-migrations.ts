@@ -32,7 +32,8 @@ const migrations = [
     '20260312_settings_banner_accent_color.sql',
     '20260313_order_email_templates.sql',
     '20260313_order_email_logs.sql',
-    '20260313_settings_smtp_config.sql'
+    '20260313_settings_smtp_config.sql',
+    '20260313_settings_tiktok.sql'
 ];
 
 async function runMigrations() {
