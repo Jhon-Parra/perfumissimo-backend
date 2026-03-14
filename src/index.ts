@@ -37,6 +37,8 @@ const disableAuthLimiter = process.env.DISABLE_AUTH_LIMIT === 'true';
 // desde el backend sin bloqueo por Cross-Origin-Resource-Policy.
 app.use(helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },
+    crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+    crossOriginEmbedderPolicy: false,
     contentSecurityPolicy: {
         useDefaults: false,
         directives: {

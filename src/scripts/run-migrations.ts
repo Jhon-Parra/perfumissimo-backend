@@ -2,7 +2,7 @@ import { pool } from '../config/database';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const MIGRATIONS_DIR = path.join(__dirname, '../../../database/migrations');
+const MIGRATIONS_DIR = path.join(__dirname, '../../database/migrations');
 
 const migrations = [
     '20260311_promotions_assignment_rules.sql',
@@ -34,6 +34,7 @@ const migrations = [
     '20260313_order_email_logs.sql',
     '20260313_settings_smtp_config.sql',
     '20260313_settings_tiktok.sql',
+    '20260313_users_supabase_id.sql',
     '20260313_auth_refresh_tokens.sql',
     '20260313_admin_audit_logs.sql'
 ];

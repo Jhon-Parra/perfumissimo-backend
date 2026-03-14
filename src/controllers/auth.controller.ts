@@ -1,38 +1,10 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
-import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
 import { pool } from '../config/database';
-import { OAuth2Client } from 'google-auth-library';
-
-const DEFAULT_JWT_SECRET = 'super_secret_jwt_key_please_change';
-const DEFAULT_REFRESH_SECRET = 'refresh_secret_key_please_change_in_production';
-
-if (process.env.NODE_ENV === 'production') {
-    if (!process.env.JWT_SECRET || process.env.JWT_SECRET === DEFAULT_JWT_SECRET) {
-        throw new Error('JWT_SECRET no esta configurado (o usa el valor por defecto). Configuralo en el entorno de produccion.');
-    }
-    if (!process.env.REFRESH_SECRET || process.env.REFRESH_SECRET === DEFAULT_REFRESH_SECRET) {
-        throw new Error('REFRESH_SECRET no esta configurado (o usa el valor por defecto). Configuralo en el entorno de produccion.');
-    }
-}
-
-const JWT_SECRET = process.env.JWT_SECRET || DEFAULT_JWT_SECRET;
-const REFRESH_SECRET = process.env.REFRESH_SECRET || DEFAULT_REFRESH_SECRET;
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-
-const ACCESS_TOKEN_EXPIRY = 15 * 60 * 1000; // 15 minutos
-const REFRESH_TOKEN_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7 días
-
-interface JwtPayload {
-    id: string;
-    rol: string;
-    exp: number;
-}
+import { supabaseAdmin, supabasePublic } from '../config/supabase';
 
 const isProduction = process.env.NODE_ENV === 'production';
 const allowCrossSiteCookies = process.env.COOKIE_CROSS_SITE === 'true';
-
 const cookieSameSite: 'lax' | 'none' = isProduction && allowCrossSiteCookies ? 'none' : 'lax';
 
 const cookieBaseOptions = {
@@ -42,124 +14,118 @@ const cookieBaseOptions = {
     path: '/'
 };
 
-const hashToken = (token: string): string =>
-    crypto.createHash('sha256').update(token).digest('hex');
+const ACCESS_TOKEN_FALLBACK_MS = 60 * 60 * 1000;
+const REFRESH_TOKEN_FALLBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
-const getRequestMeta = (req: Request) => {
-    const ip = req.ip ? String(req.ip) : null;
-    const userAgent = req.headers?.['user-agent']
-        ? String(req.headers['user-agent']).slice(0, 300)
-        : null;
-    return { ip, userAgent };
-};
+const setSessionCookies = (res: Response, session: any) => {
+    const accessMaxAge = typeof session?.expires_in === 'number'
+        ? Math.max(session.expires_in, 60) * 1000
+        : ACCESS_TOKEN_FALLBACK_MS;
 
-const storeRefreshToken = async (userId: string, refreshToken: string, req: Request): Promise<void> => {
-    const tokenHash = hashToken(refreshToken);
-    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY);
-    const { ip, userAgent } = getRequestMeta(req);
-
-    await pool.query(
-        `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip, user_agent)
-         VALUES (?, ?, ?, ?, ?)`,
-        [userId, tokenHash, expiresAt, ip, userAgent]
-    );
-};
-
-const revokeRefreshToken = async (refreshToken: string | undefined | null): Promise<void> => {
-    if (!refreshToken) return;
-    const tokenHash = hashToken(refreshToken);
-    await pool.query(
-        `UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = ?`,
-        [tokenHash]
-    );
-};
-
-const rotateRefreshToken = async (
-    userId: string,
-    currentRefreshToken: string,
-    nextRefreshToken: string,
-    req: Request
-): Promise<'ok' | 'not_found' | 'revoked'> => {
-    const client = await pool.getConnection();
-    const now = new Date();
-    const tokenHash = hashToken(currentRefreshToken);
-    const nextHash = hashToken(nextRefreshToken);
-    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY);
-    const { ip, userAgent } = getRequestMeta(req);
-
-    try {
-        await client.query('BEGIN');
-
-        const result = await client.query(
-            `SELECT id, revoked_at, expires_at
-             FROM refresh_tokens
-             WHERE token_hash = $1 AND user_id = $2`,
-            [tokenHash, userId]
-        );
-
-        if (result.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return 'not_found';
-        }
-
-        const row = result.rows[0];
-        const expired = row.expires_at ? new Date(row.expires_at) <= now : true;
-        if (row.revoked_at || expired) {
-            await client.query('ROLLBACK');
-            return 'revoked';
-        }
-
-        await client.query(
-            `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip, user_agent)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [userId, nextHash, expiresAt, ip, userAgent]
-        );
-
-        await client.query(
-            `UPDATE refresh_tokens
-             SET revoked_at = NOW(), replaced_by_hash = $1
-             WHERE id = $2`,
-            [nextHash, row.id]
-        );
-
-        await client.query('COMMIT');
-        return 'ok';
-    } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-    } finally {
-        client.release();
-    }
-};
-
-const generateTokens = (usuario: any) => {
-    const payload = {
-        id: usuario.id,
-        rol: usuario.rol
-        // No incluir 'exp' aquí; usar expiresIn en las opciones de jwt.sign
-    };
-
-    const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: '15m' });
-    const refreshToken = jwt.sign({ id: usuario.id }, REFRESH_SECRET, { expiresIn: '7d' });
-
-    return { accessToken, refreshToken };
-};
-
-const setTokenCookies = (res: Response, accessToken: string, refreshToken: string) => {
-    res.cookie('access_token', accessToken, {
+    res.cookie('access_token', session?.access_token || '', {
         ...cookieBaseOptions,
-        maxAge: ACCESS_TOKEN_EXPIRY
+        maxAge: accessMaxAge
     });
 
-    res.cookie('refresh_token', refreshToken, {
+    res.cookie('refresh_token', session?.refresh_token || '', {
         ...cookieBaseOptions,
-        maxAge: REFRESH_TOKEN_EXPIRY
+        maxAge: REFRESH_TOKEN_FALLBACK_MS
     });
 };
 
 const clearTokenCookies = (res: Response) => {
     res.clearCookie('access_token', cookieBaseOptions);
     res.clearCookie('refresh_token', cookieBaseOptions);
+};
+
+const getUserById = async (id: string) => {
+    const [rows] = await pool.query<any[]>(
+        'SELECT id, supabase_user_id, email, nombre, apellido, foto_perfil, rol FROM Usuarios WHERE id = $1',
+        [id]
+    );
+    return (rows as any[])?.[0] || null;
+};
+
+const getUserBySupabaseId = async (supabaseUserId: string) => {
+    const [rows] = await pool.query<any[]>(
+        'SELECT id, supabase_user_id, email, nombre, apellido, foto_perfil, rol FROM Usuarios WHERE supabase_user_id = $1',
+        [supabaseUserId]
+    );
+    return (rows as any[])?.[0] || null;
+};
+
+const getUserByEmail = async (email: string) => {
+    const [rows] = await pool.query<any[]>(
+        'SELECT id, supabase_user_id, email, nombre, apellido, foto_perfil, rol FROM Usuarios WHERE email = $1',
+        [email]
+    );
+    return (rows as any[])?.[0] || null;
+};
+
+const linkSupabaseUser = async (localUserId: string, supabaseUserId: string) => {
+    await pool.query(
+        'UPDATE Usuarios SET supabase_user_id = $1 WHERE id = $2',
+        [supabaseUserId, localUserId]
+    );
+};
+
+const ensureLocalUser = async (input: {
+    supabaseUserId: string;
+    email: string;
+    nombre?: string | null;
+    apellido?: string | null;
+    telefono?: string | null;
+    foto_perfil?: string | null;
+    passwordHash?: string | null;
+}): Promise<{ ok: boolean; conflict?: boolean; user?: any }> => {
+    const existingBySupabase = await getUserBySupabaseId(input.supabaseUserId);
+    if (existingBySupabase) return { ok: true, user: existingBySupabase };
+
+    const existingByEmail = await getUserByEmail(input.email);
+    if (existingByEmail) {
+        if (existingByEmail.supabase_user_id && existingByEmail.supabase_user_id !== input.supabaseUserId) {
+            return { ok: false, conflict: true };
+        }
+
+        await linkSupabaseUser(existingByEmail.id, input.supabaseUserId);
+        return {
+            ok: true,
+            user: { ...existingByEmail, supabase_user_id: input.supabaseUserId }
+        };
+    }
+
+    const passwordHash = input.passwordHash || await bcrypt.hash(Math.random().toString(36), 10);
+    await pool.query(
+        `INSERT INTO Usuarios (supabase_user_id, nombre, apellido, telefono, email, password_hash, rol, foto_perfil)
+         VALUES ($1, $2, $3, $4, $5, $6, 'CUSTOMER', $7)`,
+        [
+            input.supabaseUserId,
+            input.nombre || 'Usuario',
+            input.apellido || 'Supabase',
+            input.telefono || null,
+            input.email,
+            passwordHash,
+            input.foto_perfil || null
+        ]
+    );
+
+    const created = await getUserBySupabaseId(input.supabaseUserId);
+    return { ok: true, user: created };
+};
+
+const buildUserResponse = async (user: any) => {
+    if (!user?.id) return null;
+    const local = await getUserBySupabaseId(user.id);
+    if (local) return local;
+
+    return {
+        id: user.id,
+        email: user.email,
+        nombre: user.user_metadata?.nombre || user.user_metadata?.given_name || 'Usuario',
+        apellido: user.user_metadata?.apellido || user.user_metadata?.family_name || '',
+        foto_perfil: user.user_metadata?.avatar_url || user.user_metadata?.picture || null,
+        rol: user.user_metadata?.rol || 'CUSTOMER'
+    };
 };
 
 export const login = async (req: Request, res: Response): Promise<void> => {
@@ -171,50 +137,40 @@ export const login = async (req: Request, res: Response): Promise<void> => {
             return;
         }
 
-        const [rows] = await pool.execute(
-            'SELECT id, email, nombre, apellido, foto_perfil, password_hash, rol FROM Usuarios WHERE email = ?',
-            [email]
-        );
-        const usuarios = rows as any[];
+        const { data, error } = await supabasePublic.auth.signInWithPassword({
+            email,
+            password
+        });
 
-        if (usuarios.length === 0) {
+        if (error || !data?.session || !data?.user) {
             res.status(401).json({ error: 'Credenciales inválidas' });
             return;
         }
 
-        const usuario = usuarios[0];
+        const ensure = await ensureLocalUser({
+            supabaseUserId: data.user.id,
+            email: data.user.email || email,
+            nombre: data.user.user_metadata?.nombre || data.user.user_metadata?.given_name || null,
+            apellido: data.user.user_metadata?.apellido || data.user.user_metadata?.family_name || null,
+            telefono: data.user.user_metadata?.telefono || null,
+            foto_perfil: data.user.user_metadata?.avatar_url || data.user.user_metadata?.picture || null
+        });
 
-        const isMatch = await bcrypt.compare(password, usuario.password_hash);
-        if (!isMatch) {
-            res.status(401).json({ error: 'Credenciales inválidas' });
+        if (!ensure.ok && ensure.conflict) {
+            res.status(409).json({ error: 'Usuario existente requiere migración a Supabase' });
             return;
         }
 
-        const { accessToken, refreshToken } = generateTokens(usuario);
-        setTokenCookies(res, accessToken, refreshToken);
+        setSessionCookies(res, data.session);
 
-        try {
-            await storeRefreshToken(String(usuario.id), refreshToken, req);
-        } catch (e: any) {
-            console.error('Error storing refresh token:', e?.message || e);
-            clearTokenCookies(res);
-            res.status(500).json({ error: 'No se pudo iniciar sesión. Intenta nuevamente.' });
-            return;
-        }
+        const userPayload = ensure.user || await buildUserResponse(data.user);
 
         res.status(200).json({
             message: 'Autenticación exitosa',
-            user: {
-                id: usuario.id,
-                email: usuario.email,
-                nombre: usuario.nombre,
-                apellido: usuario.apellido,
-                foto_perfil: usuario.foto_perfil,
-                rol: usuario.rol
-            }
+            user: userPayload
         });
     } catch (error) {
-        console.error('Error en Login Auth:', error);
+        console.error('Error en Login Auth (Supabase):', error);
         res.status(500).json({ error: 'Error interno del servidor. Contacte al soporte.' });
     }
 };
@@ -228,149 +184,119 @@ export const register = async (req: Request, res: Response): Promise<void> => {
             return;
         }
 
-        const [existing] = await pool.execute(
-            'SELECT email FROM Usuarios WHERE email = ?',
-            [email]
-        );
-        const users = existing as any[];
+        const { data, error } = await supabasePublic.auth.signUp({
+            email,
+            password,
+            options: {
+                data: {
+                    nombre,
+                    apellido,
+                    telefono
+                }
+            }
+        });
 
-        if (users.length > 0) {
-            res.status(409).json({ error: 'El correo electrónico ya está registrado.' });
+        if (error || !data?.user) {
+            const msg = String(error?.message || 'No se pudo registrar el usuario');
+            if (/already registered|user exists|duplicate/i.test(msg)) {
+                res.status(409).json({ error: 'El correo electrónico ya está registrado.' });
+                return;
+            }
+            res.status(400).json({ error: msg });
             return;
         }
 
         const passwordHash = await bcrypt.hash(password, 10);
+        const ensure = await ensureLocalUser({
+            supabaseUserId: data.user.id,
+            email: data.user.email || email,
+            nombre,
+            apellido,
+            telefono,
+            foto_perfil: data.user.user_metadata?.avatar_url || null,
+            passwordHash
+        });
 
-        await pool.execute(
-            `INSERT INTO Usuarios (nombre, apellido, telefono, email, password_hash, rol) 
-             VALUES (?, ?, ?, ?, ?, 'CUSTOMER')`,
-            [nombre, apellido, telefono, email, passwordHash]
-        );
-
-        const [newRows] = await pool.execute(
-            'SELECT id, email, nombre, apellido, foto_perfil, rol FROM Usuarios WHERE email = ?',
-            [email]
-        );
-        const usuario = (newRows as any[])[0];
-
-        const { accessToken, refreshToken } = generateTokens(usuario);
-        setTokenCookies(res, accessToken, refreshToken);
-
-        try {
-            await storeRefreshToken(String(usuario.id), refreshToken, req);
-        } catch (e: any) {
-            console.error('Error storing refresh token:', e?.message || e);
-            clearTokenCookies(res);
-            res.status(500).json({ error: 'No se pudo completar el registro. Intenta nuevamente.' });
+        if (!ensure.ok && ensure.conflict) {
+            res.status(409).json({ error: 'Usuario existente requiere migración a Supabase' });
             return;
         }
 
-        res.status(201).json({
-            message: 'Usuario registrado exitosamente',
-            user: {
-                id: usuario.id,
-                email: usuario.email,
-                nombre: usuario.nombre,
-                apellido: usuario.apellido,
-                foto_perfil: usuario.foto_perfil,
-                rol: usuario.rol
-            }
-        });
+        if (data.session) {
+            setSessionCookies(res, data.session);
+        }
 
+        const userPayload = ensure.user || await buildUserResponse(data.user);
+
+        res.status(201).json({
+            message: data.session
+                ? 'Usuario registrado exitosamente'
+                : 'Registro exitoso. Revisa tu email para confirmar la cuenta.',
+            user: userPayload
+        });
     } catch (error) {
-        console.error('Error en Registro Auth:', error);
+        console.error('Error en Registro Auth (Supabase):', error);
         res.status(500).json({ error: 'Error interno al registrar usuario.' });
     }
+};
+
+const guessNamesFromMetadata = (metadata: any) => {
+    const given = metadata?.given_name || metadata?.first_name || metadata?.nombre || '';
+    const family = metadata?.family_name || metadata?.last_name || metadata?.apellido || '';
+    if (given || family) return { nombre: given || 'Usuario', apellido: family || '' };
+
+    const full = metadata?.full_name || metadata?.name || '';
+    const parts = String(full).trim().split(' ').filter(Boolean);
+    if (parts.length === 0) return { nombre: 'Usuario', apellido: 'Google' };
+    if (parts.length === 1) return { nombre: parts[0], apellido: 'Google' };
+    return { nombre: parts[0], apellido: parts.slice(1).join(' ') };
 };
 
 export const googleLogin = async (req: Request, res: Response): Promise<void> => {
     try {
         const { credential } = req.body;
 
-        if (!process.env.GOOGLE_CLIENT_ID) {
-            res.status(500).json({ error: 'GOOGLE_CLIENT_ID no está configurado en el backend' });
-            return;
-        }
-
         if (!credential) {
             res.status(400).json({ error: 'Token de Google es requerido' });
             return;
         }
 
-        let ticket;
-        try {
-            ticket = await googleClient.verifyIdToken({
-                idToken: credential,
-                audience: process.env.GOOGLE_CLIENT_ID,
-            });
-        } catch (e: any) {
-            const msg = e?.message || String(e);
-            console.error('Google verifyIdToken error:', msg);
-            // Errores tipicos: wrong audience, token expired, invalid signature
+        const { data, error } = await supabasePublic.auth.signInWithIdToken({
+            provider: 'google',
+            token: credential
+        });
+
+        if (error || !data?.session || !data?.user) {
             res.status(401).json({ error: 'Token de Google inválido o expirado' });
             return;
         }
 
-        const payloadGoogle = ticket.getPayload();
-        if (!payloadGoogle || !payloadGoogle.email) {
-            res.status(401).json({ error: 'Token de Google inválido o sin email' });
+        const { nombre, apellido } = guessNamesFromMetadata(data.user.user_metadata || {});
+
+        const ensure = await ensureLocalUser({
+            supabaseUserId: data.user.id,
+            email: data.user.email || '',
+            nombre,
+            apellido,
+            telefono: data.user.user_metadata?.telefono || null,
+            foto_perfil: data.user.user_metadata?.avatar_url || data.user.user_metadata?.picture || null
+        });
+
+        if (!ensure.ok && ensure.conflict) {
+            res.status(409).json({ error: 'Usuario existente requiere migración a Supabase' });
             return;
         }
 
-        const { email, given_name, family_name, picture } = payloadGoogle;
+        setSessionCookies(res, data.session);
 
-        const [rows] = await pool.execute(
-            'SELECT id, email, nombre, apellido, foto_perfil, rol, password_hash FROM Usuarios WHERE email = ?',
-            [email]
-        );
-        let usuarios = rows as any[];
-        let usuario: any;
-
-        if (usuarios.length === 0) {
-            console.log(`Registrando nuevo usuario via Google: ${email}`);
-            const randomPassword = await bcrypt.hash(Math.random().toString(36), 10);
-
-            await pool.execute(
-                `INSERT INTO Usuarios (nombre, apellido, email, password_hash, foto_perfil, rol) 
-                 VALUES (?, ?, ?, ?, ?, 'CUSTOMER')`,
-                [given_name || 'Desconocido', family_name || 'Google', email, randomPassword, picture || null]
-            );
-
-            const [newRows] = await pool.execute(
-                'SELECT id, email, nombre, apellido, foto_perfil, rol FROM Usuarios WHERE email = ?',
-                [email]
-            );
-            usuario = (newRows as any[])[0];
-        } else {
-            usuario = usuarios[0];
-        }
-
-        const { accessToken, refreshToken } = generateTokens(usuario);
-        setTokenCookies(res, accessToken, refreshToken);
-
-        try {
-            await storeRefreshToken(String(usuario.id), refreshToken, req);
-        } catch (e: any) {
-            console.error('Error storing refresh token:', e?.message || e);
-            clearTokenCookies(res);
-            res.status(500).json({ error: 'No se pudo iniciar sesión con Google. Intenta nuevamente.' });
-            return;
-        }
+        const userPayload = ensure.user || await buildUserResponse(data.user);
 
         res.status(200).json({
             message: 'Autenticación con Google exitosa',
-            user: {
-                id: usuario.id,
-                email: usuario.email,
-                nombre: usuario.nombre,
-                apellido: usuario.apellido,
-                foto_perfil: usuario.foto_perfil,
-                rol: usuario.rol
-            }
+            user: userPayload
         });
-
     } catch (error) {
-        console.error('Error en Google Login Auth:', error);
+        console.error('Error en Google Login Auth (Supabase):', error);
         res.status(500).json({ error: 'Error al iniciar sesión con Google' });
     }
 };
@@ -380,58 +306,48 @@ export const refreshToken = async (req: Request, res: Response): Promise<void> =
         const refreshToken = req.cookies?.refresh_token;
 
         if (!refreshToken) {
-            res.status(401).json({ error: 'Refresh token no proporcionado' });
+            res.status(200).json({ user: null });
             return;
         }
 
-        const decoded = jwt.verify(refreshToken, REFRESH_SECRET) as { id: string };
+        const { data, error } = await supabasePublic.auth.refreshSession({
+            refresh_token: refreshToken
+        });
 
-        const [rows] = await pool.execute(
-            'SELECT id, email, nombre, apellido, foto_perfil, rol FROM Usuarios WHERE id = ?',
-            [decoded.id]
-        );
-        const usuarios = rows as any[];
-
-        if (usuarios.length === 0) {
-            res.status(401).json({ error: 'Usuario no encontrado' });
-            return;
-        }
-
-        const usuario = usuarios[0];
-        const tokens = generateTokens(usuario);
-
-        const rotation = await rotateRefreshToken(String(usuario.id), refreshToken, tokens.refreshToken, req);
-        if (rotation !== 'ok') {
+        if (error || !data?.session || !data?.user) {
             clearTokenCookies(res);
             res.status(401).json({ error: 'Refresh token inválido o expirado' });
             return;
         }
 
-        setTokenCookies(res, tokens.accessToken, tokens.refreshToken);
+        setSessionCookies(res, data.session);
+
+        const userPayload = await buildUserResponse(data.user);
 
         res.status(200).json({
             message: 'Token refrescado exitosamente',
-            user: {
-                id: usuario.id,
-                email: usuario.email,
-                nombre: usuario.nombre,
-                apellido: usuario.apellido,
-                foto_perfil: usuario.foto_perfil,
-                rol: usuario.rol
-            }
+            user: userPayload
         });
     } catch (error) {
-        console.error('Error en refresh token:', error);
+        console.error('Error en refresh token (Supabase):', error);
         res.status(401).json({ error: 'Refresh token inválido o expirado' });
     }
 };
 
 export const logout = async (req: Request, res: Response): Promise<void> => {
     try {
-        await revokeRefreshToken(req.cookies?.refresh_token);
+        const accessToken = req.cookies?.access_token || req.headers.authorization?.split(' ')[1];
+        if (accessToken) {
+            const { data } = await supabasePublic.auth.getUser(accessToken);
+            const userId = data?.user?.id;
+            if (userId) {
+                await supabaseAdmin.auth.admin.signOut(userId);
+            }
+        }
     } catch (e: any) {
-        console.warn('Error revoking refresh token:', e?.message || e);
+        console.warn('Error revoking Supabase session:', e?.message || e);
     }
+
     clearTokenCookies(res);
     res.status(200).json({ message: 'Logout exitoso' });
 };
