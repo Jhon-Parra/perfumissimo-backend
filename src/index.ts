@@ -20,6 +20,7 @@ import paymentRoutes from './routes/payment.routes';
 import permissionsRoutes from './routes/permissions.routes';
 import categoryRoutes from './routes/category.routes';
 import emailTemplatesRoutes from './routes/email-templates.routes';
+import intelligenceRoutes from './routes/intelligence.routes';
 import { generalLimiter, authLimiter, refreshLimiter, logoutLimiter, aiLimiter, createOrderLimiter } from './middleware/security.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import path from 'path';
@@ -98,11 +99,11 @@ app.use(cors({
             return;
         }
 
-    // Permitir requests sin Origin (curl/postman)
-    if (!origin) {
-        callback(null, true);
-        return;
-    }
+        // Permitir requests sin Origin (curl/postman)
+        if (!origin) {
+            callback(null, true);
+            return;
+        }
 
         if (allowedOrigins.includes(origin)) {
             callback(null, true);
@@ -182,6 +183,7 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/permissions', permissionsRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/email-templates', emailTemplatesRoutes);
+app.use('/api/intelligence', intelligenceRoutes);
 
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'OK', message: 'Perfumissimo API is running' });

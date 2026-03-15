@@ -14,10 +14,10 @@ const useSsl =
 const pgPool = new Pool({
     connectionString,
     ssl: useSsl ? { rejectUnauthorized: false } : undefined,
-    // Supabase pooler (session) tiene limites estrictos: mantener bajo.
-    max: 2,
-    idleTimeoutMillis: 30000, // Cerrar conexiones inactivas tras 30s
-    connectionTimeoutMillis: 30000, // Dar más tiempo para conexión remota (30s)
+    // Supabase pooler (session) tiene limites estrictos. Usamos 3 como punto medio para evitar el error 'MaxClientsInSessionMode'.
+    max: 3,
+    idleTimeoutMillis: 10000, // Cerrar conexiones inactivas rapido tras 10s
+    connectionTimeoutMillis: 15000,
 });
 
 const replaceParams = (sql: string, params: any[]): string => {

@@ -35,6 +35,16 @@ const slugify = (name: string): string => {
         .slice(0, 120);
 };
 
+const parseBoolean = (value: any, fallback?: boolean): boolean | undefined => {
+    if (value === undefined || value === null) return fallback;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value === 1 ? true : value === 0 ? false : fallback;
+    const v = String(value).trim().toLowerCase();
+    if (v === 'true' || v === '1' || v === 'yes') return true;
+    if (v === 'false' || v === '0' || v === 'no') return false;
+    return fallback;
+};
+
 const ensureCategoryExists = async (slug: string): Promise<boolean> => {
     try {
         const [rows] = await pool.query<any[]>('SELECT 1 AS ok FROM Categorias WHERE slug = $1 LIMIT 1', [slug]);
@@ -170,6 +180,7 @@ export const createPromotion = async (req: Request, res: Response): Promise<void
             audience_user_ids
         } = req.body;
         const id = uuidv4();
+        const isActive = parseBoolean(activo, true) ?? true;
 
         const assignmentReady = await detectPromotionAssignmentSchema();
         const mediaReady = await detectPromotionMediaSchema();
@@ -231,6 +242,7 @@ export const createPromotion = async (req: Request, res: Response): Promise<void
                 if (scope === 'GENDER') {
                     if (!categorySlug) {
                         await connection.query('ROLLBACK');
+                        connection.release();
                         res.status(400).json({ error: 'Debes seleccionar una categoria' });
                         return;
                     }
@@ -238,6 +250,7 @@ export const createPromotion = async (req: Request, res: Response): Promise<void
                         const exists = await ensureCategoryExists(categorySlug);
                         if (!exists) {
                             await connection.query('ROLLBACK');
+                            connection.release();
                             res.status(400).json({ error: 'Categoria invalida. Crea la categoria primero en Admin > Categorias.' });
                             return;
                         }
@@ -263,7 +276,7 @@ export const createPromotion = async (req: Request, res: Response): Promise<void
                         scope === 'GENDER' ? categorySlug : null,
                         audience_scope || 'ALL',
                         audience_segment || null,
-                        activo ?? true
+                        isActive
                     ]
                 );
             } else {
@@ -284,7 +297,7 @@ export const createPromotion = async (req: Request, res: Response): Promise<void
                         product_scope || 'GLOBAL',
                         audience_scope || 'ALL',
                         audience_segment || null,
-                        activo ?? true
+                        isActive
                     ]
                 );
             }
@@ -350,8 +363,8 @@ export const getPromotions = async (_req: Request, res: Response): Promise<void>
                 WHERE pr.activo = true
                   AND (
                     ${advancedReady
-                         ? "(pr.discount_type = 'AMOUNT' AND COALESCE(pr.amount_discount, 0) > 0) OR (pr.discount_type <> 'AMOUNT' AND pr.porcentaje_descuento > 0)"
-                         : 'pr.porcentaje_descuento > 0'}
+                    ? "(pr.discount_type = 'AMOUNT' AND COALESCE(pr.amount_discount, 0) > 0) OR (pr.discount_type <> 'AMOUNT' AND pr.porcentaje_descuento > 0)"
+                    : 'pr.porcentaje_descuento > 0'}
                   )
                   AND pr.fecha_inicio <= NOW()
                   AND pr.fecha_fin >= NOW()
@@ -374,8 +387,8 @@ export const getPromotions = async (_req: Request, res: Response): Promise<void>
             WHERE pr.activo = true
               AND (
                 ${advancedReady
-                    ? "(pr.discount_type = 'AMOUNT' AND COALESCE(pr.amount_discount, 0) > 0) OR (pr.discount_type <> 'AMOUNT' AND pr.porcentaje_descuento > 0)"
-                    : 'pr.porcentaje_descuento > 0'}
+                ? "(pr.discount_type = 'AMOUNT' AND COALESCE(pr.amount_discount, 0) > 0) OR (pr.discount_type <> 'AMOUNT' AND pr.porcentaje_descuento > 0)"
+                : 'pr.porcentaje_descuento > 0'}
               )
               AND pr.fecha_inicio <= NOW()
               AND pr.fecha_fin >= NOW()
@@ -537,7 +550,13 @@ export const updatePromotion = async (req: Request, res: Response): Promise<void
             }
             if (fecha_inicio !== undefined) { updates.push('fecha_inicio = $' + (params.length + 1)); params.push(fecha_inicio); }
             if (fecha_fin !== undefined) { updates.push('fecha_fin = $' + (params.length + 1)); params.push(fecha_fin); }
-            if (activo !== undefined) { updates.push('activo = $' + (params.length + 1)); params.push(activo); }
+            if (activo !== undefined) {
+                const activeParsed = parseBoolean(activo, undefined);
+                if (activeParsed !== undefined) {
+                    updates.push('activo = $' + (params.length + 1));
+                    params.push(activeParsed);
+                }
+            }
             if (product_scope !== undefined) { updates.push('product_scope = $' + (params.length + 1)); params.push(product_scope); }
             if (mediaReady) {
                 if (product_gender !== undefined && (product_scope === undefined || product_scope === 'GENDER')) {
@@ -545,6 +564,7 @@ export const updatePromotion = async (req: Request, res: Response): Promise<void
                     if (product_scope === 'GENDER' || (product_scope === undefined && normalized)) {
                         if (!normalized) {
                             await connection.query('ROLLBACK');
+                            connection.release();
                             res.status(400).json({ error: 'Debes seleccionar una categoria' });
                             return;
                         }
@@ -552,6 +572,7 @@ export const updatePromotion = async (req: Request, res: Response): Promise<void
                             const exists = await ensureCategoryExists(normalized);
                             if (!exists) {
                                 await connection.query('ROLLBACK');
+                                connection.release();
                                 res.status(400).json({ error: 'Categoria invalida. Crea la categoria primero en Admin > Categorias.' });
                                 return;
                             }
@@ -643,9 +664,15 @@ export const updatePromotionActive = async (req: Request, res: Response): Promis
         const { id } = req.params;
         const { activo } = req.body;
 
+        const activeParsed = parseBoolean(activo, undefined);
+        if (activeParsed === undefined) {
+            res.status(400).json({ error: 'Valor de activo inválido' });
+            return;
+        }
+
         const [result] = await pool.query<any>(
             'UPDATE Promociones SET activo = $1 WHERE id = $2',
-            [!!activo, id]
+            [activeParsed, id]
         );
 
         const affected = Number((result as any)?.affectedRows ?? (result as any)?.rowCount ?? 0);
@@ -654,7 +681,7 @@ export const updatePromotionActive = async (req: Request, res: Response): Promis
             return;
         }
 
-        res.status(200).json({ message: 'Estado actualizado', activo: !!activo });
+        res.status(200).json({ message: 'Estado actualizado', activo: activeParsed });
     } catch (error) {
         console.error('Error updating promo active:', error);
         res.status(500).json({ error: 'Error al actualizar estado de la promocion' });

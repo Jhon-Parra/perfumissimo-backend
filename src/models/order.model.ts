@@ -15,6 +15,9 @@ export interface CreateOrderParams {
 
     envio_prioritario?: boolean;
     perfume_lujo?: boolean;
+
+    cart_recovery_applied?: boolean;
+    cart_recovery_discount_pct?: number;
 }
 
 type AddonConfig = {
@@ -29,6 +32,9 @@ type OrderAddonCols = {
     costo_envio_prioritario: boolean;
     perfume_lujo: boolean;
     costo_perfume_lujo: boolean;
+    cart_recovery_applied: boolean;
+    cart_recovery_discount_pct: boolean;
+    cart_recovery_discount_amount: boolean;
 };
 
 export type CreateOrderResult = {
@@ -86,7 +92,7 @@ const detectOrderAddonColumns = async (): Promise<OrderAddonCols> => {
             `SELECT column_name
              FROM information_schema.columns
              WHERE table_name = 'ordenes'
-               AND column_name IN ('subtotal_productos','envio_prioritario','costo_envio_prioritario','perfume_lujo','costo_perfume_lujo')`
+               AND column_name IN ('subtotal_productos','envio_prioritario','costo_envio_prioritario','perfume_lujo','costo_perfume_lujo','cart_recovery_applied','cart_recovery_discount_pct','cart_recovery_discount_amount')`
         );
         const cols = new Set((rows || []).map((r: any) => String(r.column_name)));
         return {
@@ -94,7 +100,10 @@ const detectOrderAddonColumns = async (): Promise<OrderAddonCols> => {
             envio_prioritario: cols.has('envio_prioritario'),
             costo_envio_prioritario: cols.has('costo_envio_prioritario'),
             perfume_lujo: cols.has('perfume_lujo'),
-            costo_perfume_lujo: cols.has('costo_perfume_lujo')
+            costo_perfume_lujo: cols.has('costo_perfume_lujo'),
+            cart_recovery_applied: cols.has('cart_recovery_applied'),
+            cart_recovery_discount_pct: cols.has('cart_recovery_discount_pct'),
+            cart_recovery_discount_amount: cols.has('cart_recovery_discount_amount')
         };
     } catch {
         return {
@@ -102,7 +111,10 @@ const detectOrderAddonColumns = async (): Promise<OrderAddonCols> => {
             envio_prioritario: false,
             costo_envio_prioritario: false,
             perfume_lujo: false,
-            costo_perfume_lujo: false
+            costo_perfume_lujo: false,
+            cart_recovery_applied: false,
+            cart_recovery_discount_pct: false,
+            cart_recovery_discount_amount: false
         };
     }
 };
@@ -147,7 +159,14 @@ export class OrderModel {
             const perfume_lujo = !!orderData.perfume_lujo;
             const costo_envio_prioritario = envio_prioritario ? round2(addons.envio_prioritario_precio) : 0;
             const costo_perfume_lujo = perfume_lujo ? round2(addons.perfume_lujo_precio) : 0;
-            const total = round2(subtotal_productos + costo_envio_prioritario + costo_perfume_lujo);
+            const cart_recovery_applied = !!orderData.cart_recovery_applied;
+            const cart_recovery_discount_pct = cart_recovery_applied
+                ? Math.max(0, Math.min(80, Math.trunc(Number(orderData.cart_recovery_discount_pct || 0))))
+                : 0;
+            const cart_recovery_discount_amount = cart_recovery_applied
+                ? round2(subtotal_productos * (cart_recovery_discount_pct / 100))
+                : 0;
+            const total = round2(Math.max(0, subtotal_productos - cart_recovery_discount_amount) + costo_envio_prioritario + costo_perfume_lujo);
 
             const addonCols = await detectOrderAddonColumns();
 
@@ -160,6 +179,9 @@ export class OrderModel {
             if (addonCols.costo_envio_prioritario) { cols.push('costo_envio_prioritario'); vals.push(costo_envio_prioritario); }
             if (addonCols.perfume_lujo) { cols.push('perfume_lujo'); vals.push(perfume_lujo); }
             if (addonCols.costo_perfume_lujo) { cols.push('costo_perfume_lujo'); vals.push(costo_perfume_lujo); }
+            if (addonCols.cart_recovery_applied) { cols.push('cart_recovery_applied'); vals.push(cart_recovery_applied); }
+            if (addonCols.cart_recovery_discount_pct) { cols.push('cart_recovery_discount_pct'); vals.push(cart_recovery_discount_pct); }
+            if (addonCols.cart_recovery_discount_amount) { cols.push('cart_recovery_discount_amount'); vals.push(cart_recovery_discount_amount); }
 
             const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
             await connection.query(
@@ -203,6 +225,15 @@ export class OrderModel {
         } finally {
             connection.release();
         }
+    }
+
+    static async markCartSessionConverted(sessionId: string, orderId: string): Promise<void> {
+        await pool.query(
+            `UPDATE CartSessions
+             SET status = 'CONVERTED', order_id = $2, updated_at = NOW()
+             WHERE session_id = $1`,
+            [sessionId, orderId]
+        );
     }
 
     static async getUserOrders(userId: string) {

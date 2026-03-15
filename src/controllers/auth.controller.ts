@@ -38,6 +38,20 @@ const clearTokenCookies = (res: Response) => {
     res.clearCookie('refresh_token', cookieBaseOptions);
 };
 
+const logSecurityEvent = async (req: Request, email: string | null, eventType: string) => {
+    try {
+        const ip = req.ip ? String(req.ip) : null;
+        const userAgent = req.headers?.['user-agent'] ? String(req.headers['user-agent']).slice(0, 300) : null;
+        await pool.query(
+            `INSERT INTO AuthSecurityEvents (email, ip, user_agent, event_type)
+             VALUES ($1, $2, $3, $4)`,
+            [email, ip, userAgent, eventType]
+        );
+    } catch {
+        // ignore
+    }
+};
+
 const getUserById = async (id: string) => {
     const [rows] = await pool.query<any[]>(
         'SELECT id, supabase_user_id, email, nombre, apellido, foto_perfil, rol FROM Usuarios WHERE id = $1',
@@ -143,6 +157,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         });
 
         if (error || !data?.session || !data?.user) {
+            await logSecurityEvent(req, email, 'login_failed');
             res.status(401).json({ error: 'Credenciales inválidas' });
             return;
         }
@@ -267,6 +282,8 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
         });
 
         if (error || !data?.session || !data?.user) {
+            console.error('Supabase Google Auth Error:', error);
+            await logSecurityEvent(req, null, 'login_failed');
             res.status(401).json({ error: 'Token de Google inválido o expirado' });
             return;
         }

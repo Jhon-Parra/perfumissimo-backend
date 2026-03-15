@@ -23,6 +23,18 @@ const parseUuidArray = (value: unknown): string[] | undefined => {
     return undefined;
 };
 
+const parseBooleanStrict = (value: unknown): boolean | undefined => {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value === 1 ? true : value === 0 ? false : undefined;
+    if (typeof value === 'string') {
+        const v = value.trim().toLowerCase();
+        if (v === 'true' || v === '1' || v === 'yes') return true;
+        if (v === 'false' || v === '0' || v === 'no') return false;
+    }
+    return undefined;
+};
+
 export const createPromotionSchema = z.object({
     nombre: z.string().min(1, 'Nombre es requerido').max(100),
     descripcion: z.string().optional(),
@@ -51,7 +63,7 @@ export const createPromotionSchema = z.object({
     audience_segment: z.string().min(1).max(100).optional(),
     audience_user_ids: z.preprocess(parseUuidArray, z.array(z.string().uuid()).optional()),
 
-    activo: z.coerce.boolean().optional()
+    activo: z.preprocess(parseBooleanStrict, z.boolean().optional())
 }).refine((data) => new Date(data.fecha_fin) > new Date(data.fecha_inicio), {
     message: 'Fecha fin debe ser mayor a fecha inicio',
     path: ['fecha_fin']
@@ -94,7 +106,7 @@ export const createPromotionSchema = z.object({
 });
 
 export const updatePromotionActiveSchema = z.object({
-    activo: z.coerce.boolean()
+    activo: z.preprocess(parseBooleanStrict, z.boolean())
 });
 
 export type CreatePromotionInput = z.infer<typeof createPromotionSchema>;

@@ -64,6 +64,21 @@ interface SettingsRow {
     wompi_private_key_iv?: string | null;
     wompi_private_key_tag?: string | null;
 
+    alert_sales_delta_pct?: number | null;
+    alert_abandoned_delta_pct?: number | null;
+    alert_abandoned_value_threshold?: number | null;
+    alert_negative_reviews_threshold?: number | null;
+    alert_trend_growth_pct?: number | null;
+    alert_trend_min_units?: number | null;
+    alert_failed_login_threshold?: number | null;
+    alert_abandoned_hours?: number | null;
+
+    cart_recovery_enabled?: boolean | null;
+    cart_recovery_message?: string | null;
+    cart_recovery_discount_pct?: number | null;
+    cart_recovery_countdown_seconds?: number | null;
+    cart_recovery_button_text?: string | null;
+
     // server-side only (no exponer al frontend)
     instagram_feed_configured?: boolean;
     smtp_configured?: boolean;
@@ -80,6 +95,15 @@ const normalizeMoney = (value: any): number => {
     const n = Number(value);
     if (!Number.isFinite(n) || n < 0) return 0;
     return Math.round(n * 100) / 100;
+};
+
+const normalizeInt = (value: any, min: number, max: number): number => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return min;
+    const v = Math.trunc(n);
+    if (v < min) return min;
+    if (v > max) return max;
+    return v;
 };
 
 type HeroMediaType = 'image' | 'gif' | 'video';
@@ -103,6 +127,7 @@ const MAX_ADDON_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB
 
 const detectColumns = async (columns: string[]): Promise<Record<string, boolean>> => {
     try {
+        console.log('[DEBUG] detectColumns query starting...');
         const [rows] = await pool.query<any[]>(
             `SELECT column_name
              FROM information_schema.columns
@@ -110,6 +135,7 @@ const detectColumns = async (columns: string[]): Promise<Record<string, boolean>
                AND column_name = ANY($1::text[])`,
             [columns]
         );
+        console.log(`[DEBUG] detectColumns query finished, found ${rows?.length || 0} rows`);
 
         const found = new Set((rows || []).map((r: any) => String(r.column_name)));
         const result: Record<string, boolean> = {};
@@ -123,6 +149,7 @@ const detectColumns = async (columns: string[]): Promise<Record<string, boolean>
 };
 
 export const getSettings = async (req: Request, res: Response): Promise<void> => {
+    console.log('[DEBUG] getSettings called');
     try {
         const cols = await detectColumns([
             'banner_accent_color',
@@ -130,6 +157,7 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
             'logo_height_mobile',
             'logo_height_desktop',
             'instagram_url',
+            'show_instagram_section',
             'facebook_url',
             'tiktok_url',
             'whatsapp_number',
@@ -172,7 +200,22 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
             'wompi_private_key_iv',
             'wompi_private_key_tag',
             'hero_media_type',
-            'hero_media_url'
+            'hero_media_url',
+
+            'alert_sales_delta_pct',
+            'alert_abandoned_delta_pct',
+            'alert_abandoned_value_threshold',
+            'alert_negative_reviews_threshold',
+            'alert_trend_growth_pct',
+            'alert_trend_min_units',
+            'alert_failed_login_threshold',
+            'alert_abandoned_hours',
+
+            'cart_recovery_enabled',
+            'cart_recovery_message',
+            'cart_recovery_discount_pct',
+            'cart_recovery_countdown_seconds',
+            'cart_recovery_button_text'
         ]);
 
         const selectParts = [
@@ -191,6 +234,7 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
         if (cols.logo_height_desktop) selectParts.push('logo_height_desktop');
 
         if (cols.instagram_url) selectParts.push('instagram_url');
+        if (cols.show_instagram_section) selectParts.push('show_instagram_section');
         if (cols.facebook_url) selectParts.push('facebook_url');
         if (cols.tiktok_url) selectParts.push('tiktok_url');
         if (cols.whatsapp_number) selectParts.push('whatsapp_number');
@@ -228,6 +272,21 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
         if (cols.seller_payment_notes) selectParts.push('seller_payment_notes');
 
         if (cols.wompi_env) selectParts.push('wompi_env');
+
+        if (cols.alert_sales_delta_pct) selectParts.push('alert_sales_delta_pct');
+        if (cols.alert_abandoned_delta_pct) selectParts.push('alert_abandoned_delta_pct');
+        if (cols.alert_abandoned_value_threshold) selectParts.push('alert_abandoned_value_threshold');
+        if (cols.alert_negative_reviews_threshold) selectParts.push('alert_negative_reviews_threshold');
+        if (cols.alert_trend_growth_pct) selectParts.push('alert_trend_growth_pct');
+        if (cols.alert_trend_min_units) selectParts.push('alert_trend_min_units');
+        if (cols.alert_failed_login_threshold) selectParts.push('alert_failed_login_threshold');
+        if (cols.alert_abandoned_hours) selectParts.push('alert_abandoned_hours');
+
+        if (cols.cart_recovery_enabled) selectParts.push('cart_recovery_enabled');
+        if (cols.cart_recovery_message) selectParts.push('cart_recovery_message');
+        if (cols.cart_recovery_discount_pct) selectParts.push('cart_recovery_discount_pct');
+        if (cols.cart_recovery_countdown_seconds) selectParts.push('cart_recovery_countdown_seconds');
+        if (cols.cart_recovery_button_text) selectParts.push('cart_recovery_button_text');
 
         const [rows] = await pool.query<SettingsRow[]>(
             `SELECT ${selectParts.join(', ')} FROM ConfiguracionGlobal WHERE id = 1`
@@ -281,22 +340,43 @@ export const getSettings = async (req: Request, res: Response): Promise<void> =>
 
 export const updateSettings = async (req: Request, res: Response): Promise<void> => {
     try {
+        const [currentRows] = await pool.query<SettingsRow[]>(
+            'SELECT hero_title, hero_subtitle, accent_color, show_banner, banner_text, logo_height_mobile, logo_height_desktop FROM ConfiguracionGlobal WHERE id = 1'
+        );
+
+        if (currentRows.length === 0) {
+            res.status(404).json({ error: 'Configuración base no encontrada' });
+            return;
+        }
+
+        const current = currentRows[0];
+
         const {
-            hero_title,
-            hero_subtitle,
+            hero_title = current.hero_title,
+            hero_subtitle = current.hero_subtitle,
             hero_media_type,
-            accent_color,
-            show_banner,
-            banner_text,
+            accent_color = current.accent_color,
+            show_banner = current.show_banner,
+            banner_text = current.banner_text,
             banner_accent_color,
             logo_height_mobile,
             logo_height_desktop,
             instagram_url,
             instagram_access_token,
+            show_instagram_section,
             facebook_url,
             tiktok_url,
             whatsapp_number,
             whatsapp_message,
+
+            alert_sales_delta_pct,
+            alert_abandoned_delta_pct,
+            alert_abandoned_value_threshold,
+            alert_negative_reviews_threshold,
+            alert_trend_growth_pct,
+            alert_trend_min_units,
+            alert_failed_login_threshold,
+            alert_abandoned_hours,
 
             envio_prioritario_precio,
             perfume_lujo_precio,
@@ -327,7 +407,13 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
 
             wompi_env,
             wompi_public_key,
-            wompi_private_key
+            wompi_private_key,
+
+            cart_recovery_enabled,
+            cart_recovery_message,
+            cart_recovery_discount_pct,
+            cart_recovery_countdown_seconds,
+            cart_recovery_button_text
         } = req.body;
 
         const files = (req as any).files as Record<string, Express.Multer.File[]> | undefined;
@@ -498,6 +584,7 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
             'logo_height_mobile',
             'logo_height_desktop',
             'instagram_url',
+            'show_instagram_section',
             'facebook_url',
             'tiktok_url',
             'whatsapp_number',
@@ -538,7 +625,22 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
             'wompi_private_key_iv',
             'wompi_private_key_tag',
             'hero_media_type',
-            'hero_media_url'
+            'hero_media_url',
+
+            'alert_sales_delta_pct',
+            'alert_abandoned_delta_pct',
+            'alert_abandoned_value_threshold',
+            'alert_negative_reviews_threshold',
+            'alert_trend_growth_pct',
+            'alert_trend_min_units',
+            'alert_failed_login_threshold',
+            'alert_abandoned_hours',
+
+            'cart_recovery_enabled',
+            'cart_recovery_message',
+            'cart_recovery_discount_pct',
+            'cart_recovery_countdown_seconds',
+            'cart_recovery_button_text'
         ]);
 
         // Si el frontend envia extras pero la DB no tiene columnas, devolver error claro.
@@ -594,6 +696,64 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
         if (columns.whatsapp_message) {
             query += `, whatsapp_message = ?`;
             params.push(normalizeNullableString(whatsapp_message, 255));
+        }
+        if (columns.show_instagram_section && show_instagram_section !== undefined) {
+            query += `, show_instagram_section = ?`;
+            params.push(!!show_instagram_section);
+        }
+
+        if (columns.alert_sales_delta_pct && alert_sales_delta_pct !== undefined) {
+            query += `, alert_sales_delta_pct = ?`;
+            params.push(normalizeInt(alert_sales_delta_pct, 0, 100));
+        }
+        if (columns.alert_abandoned_delta_pct && alert_abandoned_delta_pct !== undefined) {
+            query += `, alert_abandoned_delta_pct = ?`;
+            params.push(normalizeInt(alert_abandoned_delta_pct, 0, 100));
+        }
+        if (columns.alert_abandoned_value_threshold && alert_abandoned_value_threshold !== undefined) {
+            query += `, alert_abandoned_value_threshold = ?`;
+            params.push(normalizeMoney(alert_abandoned_value_threshold));
+        }
+        if (columns.alert_negative_reviews_threshold && alert_negative_reviews_threshold !== undefined) {
+            query += `, alert_negative_reviews_threshold = ?`;
+            params.push(normalizeInt(alert_negative_reviews_threshold, 1, 50));
+        }
+        if (columns.alert_trend_growth_pct && alert_trend_growth_pct !== undefined) {
+            query += `, alert_trend_growth_pct = ?`;
+            params.push(normalizeInt(alert_trend_growth_pct, 0, 300));
+        }
+        if (columns.alert_trend_min_units && alert_trend_min_units !== undefined) {
+            query += `, alert_trend_min_units = ?`;
+            params.push(normalizeInt(alert_trend_min_units, 1, 2000));
+        }
+        if (columns.alert_failed_login_threshold && alert_failed_login_threshold !== undefined) {
+            query += `, alert_failed_login_threshold = ?`;
+            params.push(normalizeInt(alert_failed_login_threshold, 3, 50));
+        }
+        if (columns.alert_abandoned_hours && alert_abandoned_hours !== undefined) {
+            query += `, alert_abandoned_hours = ?`;
+            params.push(normalizeInt(alert_abandoned_hours, 1, 240));
+        }
+
+        if (columns.cart_recovery_enabled && cart_recovery_enabled !== undefined) {
+            query += `, cart_recovery_enabled = ?`;
+            params.push(!!cart_recovery_enabled);
+        }
+        if (columns.cart_recovery_message && cart_recovery_message !== undefined) {
+            query += `, cart_recovery_message = ?`;
+            params.push(normalizeNullableString(cart_recovery_message, 2000));
+        }
+        if (columns.cart_recovery_discount_pct && cart_recovery_discount_pct !== undefined) {
+            query += `, cart_recovery_discount_pct = ?`;
+            params.push(normalizeInt(cart_recovery_discount_pct, 0, 80));
+        }
+        if (columns.cart_recovery_countdown_seconds && cart_recovery_countdown_seconds !== undefined) {
+            query += `, cart_recovery_countdown_seconds = ?`;
+            params.push(normalizeInt(cart_recovery_countdown_seconds, 10, 900));
+        }
+        if (columns.cart_recovery_button_text && cart_recovery_button_text !== undefined) {
+            query += `, cart_recovery_button_text = ?`;
+            params.push(normalizeNullableString(cart_recovery_button_text, 60));
         }
 
         if (columns.envio_prioritario_precio && envio_prioritario_precio !== undefined) {

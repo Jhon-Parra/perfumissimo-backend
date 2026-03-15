@@ -12,7 +12,7 @@ export class OrderController {
                 return;
             }
 
-            const { shipping_address, items, transaction_code, envio_prioritario, perfume_lujo } = req.body;
+            const { shipping_address, items, transaction_code, envio_prioritario, perfume_lujo, cart_session_id, cart_recovery_applied, cart_recovery_discount_pct } = req.body;
 
             // Validaciones
             if (!shipping_address || shipping_address.trim() === '') {
@@ -30,10 +30,21 @@ export class OrderController {
                 items,
                 transaction_code,
                 envio_prioritario: !!envio_prioritario,
-                perfume_lujo: !!perfume_lujo
+                perfume_lujo: !!perfume_lujo,
+                cart_recovery_applied: !!cart_recovery_applied,
+                cart_recovery_discount_pct
             };
 
             const created = await OrderModel.createOrder(orderData);
+
+            const sessionId = String(cart_session_id || '').trim();
+            if (sessionId) {
+                try {
+                    await OrderModel.markCartSessionConverted(sessionId, created.orderId);
+                } catch (e: any) {
+                    console.warn('No se pudo actualizar cart session:', e?.message || e);
+                }
+            }
 
             // Notificación (no bloquear respuesta)
             notifyOrderCreated(created.orderId).catch((e) => console.error('Order email error:', e));

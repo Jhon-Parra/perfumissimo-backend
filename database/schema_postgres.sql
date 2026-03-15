@@ -148,6 +148,9 @@ CREATE TABLE IF NOT EXISTS Ordenes (
     costo_envio_prioritario DECIMAL(10, 2) DEFAULT 0,
     perfume_lujo BOOLEAN DEFAULT false,
     costo_perfume_lujo DECIMAL(10, 2) DEFAULT 0,
+    cart_recovery_applied BOOLEAN DEFAULT false,
+    cart_recovery_discount_pct INT DEFAULT 0,
+    cart_recovery_discount_amount DECIMAL(10, 2) DEFAULT 0,
     creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_orden_usuario FOREIGN KEY (usuario_id) REFERENCES Usuarios (id) ON DELETE RESTRICT
@@ -207,6 +210,7 @@ CREATE TABLE IF NOT EXISTS ConfiguracionGlobal (
     logo_height_desktop INT DEFAULT 112,
 
     instagram_url VARCHAR(500),
+    show_instagram_section BOOLEAN DEFAULT TRUE,
     instagram_access_token VARCHAR(500),
     facebook_url VARCHAR(500),
     whatsapp_number VARCHAR(40),
@@ -261,6 +265,21 @@ ALTER TABLE IF EXISTS ConfiguracionGlobal
     ADD COLUMN IF NOT EXISTS smtp_pass_enc TEXT,
     ADD COLUMN IF NOT EXISTS smtp_pass_iv VARCHAR(255),
     ADD COLUMN IF NOT EXISTS smtp_pass_tag VARCHAR(255);
+
+ALTER TABLE IF EXISTS ConfiguracionGlobal
+    ADD COLUMN IF NOT EXISTS alert_sales_delta_pct INT DEFAULT 20,
+    ADD COLUMN IF NOT EXISTS alert_abandoned_delta_pct INT DEFAULT 20,
+    ADD COLUMN IF NOT EXISTS alert_abandoned_value_threshold DECIMAL(12, 2) DEFAULT 1000000,
+    ADD COLUMN IF NOT EXISTS alert_negative_reviews_threshold INT DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS alert_trend_growth_pct INT DEFAULT 30,
+    ADD COLUMN IF NOT EXISTS alert_trend_min_units INT DEFAULT 5,
+    ADD COLUMN IF NOT EXISTS alert_failed_login_threshold INT DEFAULT 5,
+    ADD COLUMN IF NOT EXISTS alert_abandoned_hours INT DEFAULT 24,
+    ADD COLUMN IF NOT EXISTS cart_recovery_enabled BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS cart_recovery_message TEXT,
+    ADD COLUMN IF NOT EXISTS cart_recovery_discount_pct INT DEFAULT 10,
+    ADD COLUMN IF NOT EXISTS cart_recovery_countdown_seconds INT DEFAULT 120,
+    ADD COLUMN IF NOT EXISTS cart_recovery_button_text VARCHAR(60);
 
 -- ---------------------------------------------------------
 -- Tabla: OrderEmailTemplates (plantillas de correo por estado)
@@ -341,3 +360,68 @@ CREATE TABLE IF NOT EXISTS Resenas (
 );
 
 CREATE INDEX IF NOT EXISTS idx_resenas_producto ON Resenas (producto_id);
+
+-- ---------------------------------------------------------
+-- Tabla: SearchEvents (busquedas)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS SearchEvents (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    user_id UUID NULL,
+    session_id VARCHAR(80) NULL,
+    query TEXT NOT NULL,
+    product_ids JSONB,
+    results_count INT DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_events_created_at ON SearchEvents(created_at);
+CREATE INDEX IF NOT EXISTS idx_search_events_user_id ON SearchEvents(user_id);
+
+-- ---------------------------------------------------------
+-- Tabla: ProductViewEvents (vistas de producto)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ProductViewEvents (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    user_id UUID NULL,
+    session_id VARCHAR(80) NULL,
+    product_id UUID NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT fk_product_view_product FOREIGN KEY (product_id) REFERENCES Productos (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_views_created_at ON ProductViewEvents(created_at);
+CREATE INDEX IF NOT EXISTS idx_product_views_product_id ON ProductViewEvents(product_id);
+
+-- ---------------------------------------------------------
+-- Tabla: CartSessions (carritos)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS CartSessions (
+    session_id VARCHAR(80) PRIMARY KEY,
+    user_id UUID NULL,
+    items JSONB NOT NULL,
+    total NUMERIC(12, 2) DEFAULT 0,
+    status VARCHAR(20) NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'CONVERTED', 'ABANDONED')),
+    order_id UUID NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT fk_cart_user FOREIGN KEY (user_id) REFERENCES Usuarios (id) ON DELETE SET NULL,
+    CONSTRAINT fk_cart_order FOREIGN KEY (order_id) REFERENCES Ordenes (id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cart_sessions_updated_at ON CartSessions(updated_at);
+CREATE INDEX IF NOT EXISTS idx_cart_sessions_status ON CartSessions(status);
+
+-- ---------------------------------------------------------
+-- Tabla: AuthSecurityEvents (seguridad)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS AuthSecurityEvents (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    email VARCHAR(150),
+    ip TEXT,
+    user_agent TEXT,
+    event_type VARCHAR(60) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_security_events_created_at ON AuthSecurityEvents(created_at);
+CREATE INDEX IF NOT EXISTS idx_auth_security_events_email ON AuthSecurityEvents(email);

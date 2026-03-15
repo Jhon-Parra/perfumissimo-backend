@@ -36,7 +36,15 @@ const migrations = [
     '20260313_settings_tiktok.sql',
     '20260313_users_supabase_id.sql',
     '20260313_auth_refresh_tokens.sql',
-    '20260313_admin_audit_logs.sql'
+    '20260313_admin_audit_logs.sql',
+    '20260314_settings_intelligence_alerts.sql',
+    '20260314_settings_cart_recovery.sql',
+    '20260314_settings_instagram_section.sql',
+    '20260314_orders_cart_recovery_discount.sql',
+    '20260314_search_events.sql',
+    '20260314_product_view_events.sql',
+    '20260314_cart_sessions.sql',
+    '20260314_auth_security_events.sql'
 ];
 
 async function runMigrations() {
